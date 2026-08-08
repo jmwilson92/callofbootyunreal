@@ -497,69 +497,128 @@ def clear_landscape():
     return removed
 
 
-def _landscape_info(a):
-    """Infer a landscape's heightmap resolution from its bounds and scale.
-
-    Needed because "the landscape in this level" stopped being a safe
-    assumption. The Open World template ships one, the import adds a second
-    called Landscape2, and picking whichever the actor list returned first
-    applied the 17.6 km transform to a 505x505 template default while the real
-    terrain sat untouched. Bounds discriminate them by a factor of eight, and
-    unlike a name they cannot be wrong.
-    """
-    try:
-        origin, extent = a.get_actor_bounds(False)
-    except Exception:                                            # noqa: BLE001
+def _bounds(a):
+    """(origin, extent) across engine versions, or None."""
+    for args in ((False,), (False, False)):
         try:
-            origin, extent = a.get_actor_bounds(False, False)
-        except Exception as exc:                                 # noqa: BLE001
-            warn("no bounds for {} ({})".format(a.get_actor_label(), exc))
-            return None
-    sc = a.get_actor_scale3d()
-    quads = (extent.x * 2.0) / sc.x if sc.x else 0.0
-    return {
-        "actor": a,
-        "label": a.get_actor_label(),
-        "res": int(round(quads)) + 1,
-        "scale": sc,
-        "location": a.get_actor_location(),
-    }
+            return a.get_actor_bounds(*args)
+        except Exception:                                        # noqa: BLE001
+            continue
+    return None
+
+
+def _is_proxy(a):
+    """Is this a streaming fragment rather than the landscape itself?"""
+    cls = getattr(unreal, "LandscapeStreamingProxy", None)
+    if cls is not None:
+        return isinstance(a, cls)
+    return "StreamingProxy" in type(a).__name__
+
+
+def _landscape_groups():
+    """Collect landscape actors into logical landscapes.
+
+    A World Partition landscape is not one actor. It is a parent ALandscape
+    carrying no geometry of its own — its bounds measure about zero — plus one
+    LandscapeStreamingProxy per region, each holding a fragment. Measuring
+    actors one at a time therefore reports a correct 4033 import as a single
+    ~1x1 actor and 256 ~253x253 ones, and concludes that none of them is the
+    landscape that was just imported. Resolution is a property of the group,
+    so group before measuring.
+    """
+    actors = _find_landscapes()
+    parents = [a for a in actors if not _is_proxy(a)]
+    proxies = [a for a in actors if _is_proxy(a)]
+
+    groups = {}
+    for p in parents:
+        groups[p.get_name()] = {"parent": p, "members": [p]}
+
+    for q in proxies:
+        owner = None
+        try:                                    # the proxy names its parent
+            la = q.get_editor_property("landscape_actor")
+            if la:
+                owner = la.get_name()
+        except Exception:                                        # noqa: BLE001
+            owner = None
+        if owner in groups:
+            groups[owner]["members"].append(q)
+        elif len(parents) == 1:
+            groups[parents[0].get_name()]["members"].append(q)
+        else:
+            groups.setdefault("_orphans", {"parent": None, "members": []})
+            groups["_orphans"]["members"].append(q)
+
+    out = []
+    for g in groups.values():
+        lo_x = lo_y = float("inf")
+        hi_x = hi_y = float("-inf")
+        scale = None
+        for a in g["members"]:
+            b = _bounds(a)
+            if not b:
+                continue
+            origin, extent = b
+            if extent.x <= 1.0:                 # the geometry-less parent
+                continue
+            lo_x = min(lo_x, origin.x - extent.x)
+            lo_y = min(lo_y, origin.y - extent.y)
+            hi_x = max(hi_x, origin.x + extent.x)
+            hi_y = max(hi_y, origin.y + extent.y)
+            scale = a.get_actor_scale3d()
+        if scale is None or lo_x == float("inf"):
+            continue
+        quads = (hi_x - lo_x) / scale.x if scale.x else 0.0
+        anchor = g["parent"] or g["members"][0]
+        out.append({
+            "parent": g["parent"],
+            "members": g["members"],
+            "label": anchor.get_actor_label(),
+            "res": int(round(quads)) + 1,
+            "scale": scale,
+            "minCorner": (lo_x, lo_y),
+        })
+    return out
 
 
 def identify():
-    """List every landscape with the resolution its geometry implies."""
+    """List each logical landscape with the resolution its geometry implies."""
     meta = load_meta()
     want = meta["resolution"] if meta else None
-    infos = [i for i in (_landscape_info(a) for a in _find_landscapes()) if i]
-    if not infos:
+    groups = _landscape_groups()
+    if not groups:
         log("no landscape actors loaded. If the Outliner shows one greyed out, "
             "right-click it -> Load, then re-run.")
         return []
     log("=" * 64)
-    for i in infos:
+    for g in groups:
         tag = ""
         if want:
-            tag = "  <- ours" if abs(i["res"] - want) <= max(2, want * 0.02) \
-                else "  <- NOT ours (template default?)"
-        log("{:<16} ~{} x {}  scale {:.1f}  at ({:.0f}, {:.0f}, {:.0f}){}".format(
-            i["label"], i["res"], i["res"], i["scale"].x,
-            i["location"].x, i["location"].y, i["location"].z, tag))
+            tag = "  <- ours" if abs(g["res"] - want) <= max(2, want * 0.02) \
+                else "  <- NOT ours"
+        log("{:<16} ~{} x {}  scale {:.3f}  {} actors  corner ({:.0f}, {:.0f}){}"
+            .format(g["label"], g["res"], g["res"], g["scale"].x,
+                    len(g["members"]), g["minCorner"][0], g["minCorner"][1], tag))
     log("=" * 64)
-    return infos
+    return groups
 
 
 def place_landscape(delete_others="yes"):
-    """Transform the imported landscape, and remove any impostor beside it.
+    """Scale and position the imported landscape, streaming proxies included.
 
-    Picks by resolution rather than by order: the level can hold the template's
-    505x505 default and our 4033 import at the same time, and only one of them
-    should be 17.6 km across.
+    Setting the parent actor's transform is the intended move — the landscape
+    propagates it to its proxies. That is verified rather than assumed: a proxy
+    position is read before and after, and if nothing moved, every member is
+    transformed directly, preserving the grid by scaling each offset from the
+    landscape's own corner. A landscape half-moved is worse than one not moved
+    at all, and the two are indistinguishable from the log line.
     """
     meta = load_meta()
     if not meta:
         return False
-    infos = [i for i in (_landscape_info(a) for a in _find_landscapes()) if i]
-    if not infos:
+    groups = _landscape_groups()
+    if not groups:
         warn("no landscape loaded in this level.")
         warn("If the Outliner shows one greyed out it is unloaded and invisible "
              "to Python — right-click it -> Load, then re-run.")
@@ -567,41 +626,60 @@ def place_landscape(delete_others="yes"):
 
     want = meta["resolution"]
     tol = max(2, want * 0.02)
-    ours = [i for i in infos if abs(i["res"] - want) <= tol]
-    others = [i for i in infos if abs(i["res"] - want) > tol]
+    ours = [g for g in groups if abs(g["res"] - want) <= tol]
+    others = [g for g in groups if abs(g["res"] - want) > tol]
 
     if not ours:
         warn("none of the {} landscape(s) here look like a {} import:".format(
-            len(infos), want))
-        for i in infos:
-            warn("  {} reads as ~{} x {}".format(i["label"], i["res"], i["res"]))
-        warn("Import the heightmap first, or right-click any unloaded landscape "
-             "in the Outliner -> Load and re-run.")
+            len(groups), want))
+        for g in groups:
+            warn("  {} reads as ~{} x {} across {} actors".format(
+                g["label"], g["res"], g["res"], len(g["members"])))
         return False
-    if len(ours) > 1:
-        warn("{} landscapes match {} — using {}".format(
-            len(ours), want, ours[0]["label"]))
+    g = ours[0]
 
     if others and str(delete_others).lower() not in ("no", "false", "0"):
         sub = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
-        for i in others:
-            log("deleting {} (~{} x {}, not our import)".format(
-                i["label"], i["res"], i["res"]))
-            try:
-                sub.destroy_actor(i["actor"])
-            except Exception as exc:                             # noqa: BLE001
-                warn("  could not delete it ({})".format(exc))
-    elif others:
-        warn("leaving {} other landscape(s) in place".format(len(others)))
+        for o in others:
+            log("deleting {} (~{} x {}, {} actors, not our import)".format(
+                o["label"], o["res"], o["res"], len(o["members"])))
+            for a in o["members"]:
+                try:
+                    sub.destroy_actor(a)
+                except Exception as exc:                         # noqa: BLE001
+                    warn("  could not delete {} ({})".format(
+                        a.get_actor_label(), exc))
 
     tr = transform_for(meta)
-    a = ours[0]["actor"]
     sx, sy, sz = tr["scale"]
     lx, ly, lz = tr["location"]
-    a.set_actor_scale3d(unreal.Vector(sx, sy, sz))
-    a.set_actor_location(unreal.Vector(lx, ly, lz), False, False)
-    log("placed {} (~{} x {}): scale ({}, {}, {}) at ({:.0f}, {:.0f}, {:.0f})".format(
-        ours[0]["label"], ours[0]["res"], ours[0]["res"], sx, sy, sz, lx, ly, lz))
+
+    # Snapshot enough to redo this by hand if the parent does not propagate.
+    old_scale = g["scale"].x
+    old_lo_x, old_lo_y = g["minCorner"]
+    before = [(a, a.get_actor_location()) for a in g["members"]]
+    witness = next((a for a in g["members"] if _is_proxy(a)), None)
+    witness_x = witness.get_actor_location().x if witness else None
+
+    target = g["parent"] or g["members"][0]
+    target.set_actor_scale3d(unreal.Vector(sx, sy, sz))
+    target.set_actor_location(unreal.Vector(lx, ly, lz), False, False)
+
+    if witness is not None and abs(witness.get_actor_location().x - witness_x) < 1.0:
+        log("parent transform did not reach the proxies — moving all {} "
+            "directly".format(len(g["members"])))
+        factor = (sx / old_scale) if old_scale else 1.0
+        for a, loc in before:
+            a.set_actor_scale3d(unreal.Vector(sx, sy, sz))
+            a.set_actor_location(unreal.Vector(
+                lx + (loc.x - old_lo_x) * factor,
+                ly + (loc.y - old_lo_y) * factor,
+                lz), False, False)
+
+    log("placed {} (~{} x {}, {} actors): scale ({}, {}, {}) at "
+        "({:.0f}, {:.0f}, {:.0f})".format(
+            g["label"], g["res"], g["res"], len(g["members"]),
+            sx, sy, sz, lx, ly, lz))
     log("  {:.2f} km square, sea level at Z=0, centred on the origin".format(
         tr["spanKM"]))
     log("  Save with Ctrl+S, then: ... build_sandiego.py look downtown")
