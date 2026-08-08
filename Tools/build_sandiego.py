@@ -34,6 +34,8 @@ puts the whole city 60 m under the sea.
     water               lay a sea surface at Z=0 across the map
     material            colour the terrain by height and slope
     roads               lay the freeways along the traced routes
+    city [what]         lay the surface streets and buildings from the plan
+    city-report         what the city plan contains, without touching the level
     sample              compare the level against the file, per tile
     load                load every World Partition actor first
     wp-api              list the World Partition bindings this build has
@@ -43,6 +45,7 @@ puts the whole city 60 m under the sea.
 import json
 import math
 import os
+import sys
 
 import unreal
 
@@ -1629,6 +1632,508 @@ def roads():
     return True
 
 
+# -------------------------------------------------------------------- city --
+#
+# The city fabric — streets and buildings — generated in the callofbooty repo by
+# tools/export-city.mjs and read here. Nothing about the layout is decided in
+# this file; the browser build and this one have to agree on where every
+# building stands, and they only do that if one of them is the author and the
+# other is the reader.
+#
+# Everything goes into instanced static meshes. There are on the order of
+# 150,000 buildings: as StaticMeshActors that is 150,000 entries in the outliner
+# and an editor that will not move. As instances on a handful of hierarchical
+# components it is a few dozen actors and the renderer batches the rest.
+
+CITY_TAG = "SanDiegoCity"
+CITY_JSON = "city.json"
+CITY_BIN = "city-buildings.bin"
+
+# Street centrelines are walked at this spacing so they follow the ground.
+# Coarser than the freeways because a residential street has no grade standard
+# to meet — it goes where the hill goes.
+STREET_STEP_M = 34.0
+
+# How far a building is sunk into the ground. Footprints sit on sloping lots and
+# a box placed exactly on the sampled height at its centre floats at one corner
+# and buries at the other; dropping it a little turns "floating" into "cut into
+# the slope", which is what a real foundation does anyway.
+BUILDING_SINK_M = 1.8
+
+# Base colour and roughness per building kind. Deliberately flat and desaturated
+# — this is massing, not architecture, and saturated boxes read as toys.
+CITY_PALETTE = {
+    "house":      ((0.402, 0.360, 0.302), 0.88),
+    "rowhouse":   ((0.436, 0.386, 0.332), 0.86),
+    "midrise":    ((0.352, 0.340, 0.322), 0.80),
+    "tower":      ((0.240, 0.256, 0.278), 0.42),
+    "commercial": ((0.372, 0.360, 0.340), 0.76),
+    "industrial": ((0.330, 0.334, 0.336), 0.82),
+    "military":   ((0.288, 0.300, 0.276), 0.84),
+    "campus":     ((0.360, 0.350, 0.330), 0.80),
+    "park":       ((0.318, 0.330, 0.300), 0.86),
+}
+
+
+def _city_paths():
+    """Where the export lands. Beside this script first, as with the heightmap:
+    an engine-upgrade copy of the project carries a stale one."""
+    return (os.path.join(HEIGHTMAP_DIR, CITY_JSON),
+            os.path.join(HEIGHTMAP_DIR, CITY_BIN))
+
+
+def _load_city():
+    """The city.json sidecar, or None with a reason logged."""
+    json_path, bin_path = _city_paths()
+    if not os.path.exists(json_path):
+        warn("MISSING city plan. Expected: {}".format(json_path))
+        warn("Generate it in the callofbooty repo:  node tools/export-city.mjs")
+        warn("then copy out/city.json and out/city-buildings.bin into Tools/Heightmaps.")
+        return None
+    with open(json_path, "r") as handle:
+        city = json.load(handle)
+    city["_json_path"] = json_path
+    city["_bin_path"] = bin_path if os.path.exists(bin_path) else None
+    if city["_bin_path"]:
+        stride = int(city.get("buildingStride", 7))
+        expect = int(city.get("buildingCount", 0)) * stride * 4
+        actual = os.path.getsize(bin_path)
+        if actual != expect:
+            warn("{} is {} bytes, expected {} — the plan and the buffer are "
+                 "from different exports. Re-copy both.".format(
+                     CITY_BIN, actual, expect))
+            city["_bin_path"] = None
+    else:
+        warn("no {} beside {} — streets will build, buildings will not".format(
+            CITY_BIN, CITY_JSON))
+    return city
+
+
+_HEIGHTS = {}
+
+
+def _height_field(meta):
+    """The whole .r16 in memory, as unsigned shorts.
+
+    `_sample_metres` opens the file per sample. That is fine for a few thousand
+    freeway points and ruinous for 150,000 buildings — it is 150,000 opens, and
+    the command never finishes. The file is 32 MB; hold it.
+    """
+    key = meta["_raw_path"]
+    if key in _HEIGHTS:
+        return _HEIGHTS[key]
+    import array
+    data = array.array("H")
+    with open(key, "rb") as fh:
+        data.fromfile(fh, meta["resolution"] * meta["resolution"])
+    if sys.byteorder != "little":
+        data.byteswap()
+    _HEIGHTS[key] = data
+    return data
+
+
+def _fast_metres(meta, field, col, row):
+    """One height out of the cached field, in metres above sea level."""
+    res = meta["resolution"]
+    if col < 0:
+        col = 0
+    elif col >= res:
+        col = res - 1
+    if row < 0:
+        row = 0
+    elif row >= res:
+        row = res - 1
+    lo = meta["heightRangeMetres"]["min"]
+    hi = meta["heightRangeMetres"]["max"]
+    return lo + (field[row * res + col] / 65535.0) * (hi - lo)
+
+
+def _level_origin(meta):
+    """Where the landscape's minimum corner actually sits, in world cm.
+
+    The import dialog's Location is a centre and the finished actor's Location
+    is a corner, so the only trustworthy answer comes from measuring the
+    landscape that is in the level rather than from recomputing what it should
+    have been.
+    """
+    res = meta["resolution"]
+    span_uu = (res - 1) * meta["unrealLandscapeScale"]["x"]
+    x0 = y0 = -span_uu / 2.0
+    groups = [g for g in _landscape_groups()
+              if abs(g["res"] - meta["resolution"]) <= max(2, meta["resolution"] * 0.02)]
+    if groups:
+        x0, y0 = groups[0]["minCorner"]
+    else:
+        found = _find_landscapes()
+        if found:
+            loc = found[0].get_actor_location()
+            x0, y0 = loc.x, loc.y
+        else:
+            warn("no landscape found — placing the city about the world origin")
+    return x0, y0, span_uu
+
+
+def _city_material(kind):
+    """A flat colour per building kind, built once and reused."""
+    path = "/Game/Materials/M_City_{}".format(kind)
+    if unreal.EditorAssetLibrary.does_asset_exist(path):
+        return unreal.EditorAssetLibrary.load_asset(path)
+    rgb, rough = CITY_PALETTE.get(kind, ((0.36, 0.35, 0.33), 0.85))
+    try:
+        tools = unreal.AssetToolsHelpers.get_asset_tools()
+        folder, name = path.rsplit("/", 1)
+        mat = tools.create_asset(name, folder, unreal.Material,
+                                 unreal.MaterialFactoryNew())
+        col = _expr(mat, "MaterialExpressionVectorParameter", -420, 0)
+        col.set_editor_property("parameter_name", "Base")
+        col.set_editor_property("default_value",
+                                unreal.LinearColor(rgb[0], rgb[1], rgb[2], 1.0))
+        unreal.MaterialEditingLibrary.connect_material_property(
+            col, "", unreal.MaterialProperty.MP_BASE_COLOR)
+        rn = _expr(mat, "MaterialExpressionScalarParameter", -420, 200)
+        rn.set_editor_property("parameter_name", "Roughness")
+        rn.set_editor_property("default_value", rough)
+        unreal.MaterialEditingLibrary.connect_material_property(
+            rn, "", unreal.MaterialProperty.MP_ROUGHNESS)
+        if kind == "tower":
+            # Glass towers are the one thing that reads wrong as pure diffuse:
+            # a downtown of matte grey boxes looks like a model, not a skyline.
+            sp = _expr(mat, "MaterialExpressionScalarParameter", -420, 320)
+            sp.set_editor_property("parameter_name", "Metallic")
+            sp.set_editor_property("default_value", 0.55)
+            unreal.MaterialEditingLibrary.connect_material_property(
+                sp, "", unreal.MaterialProperty.MP_METALLIC)
+        unreal.MaterialEditingLibrary.recompile_material(mat)
+        unreal.EditorAssetLibrary.save_asset(path)
+        return mat
+    except Exception as exc:                                     # noqa: BLE001
+        warn("could not build {} ({})".format(path, exc))
+        return None
+
+
+def _add_ism_component(actor, name):
+    """Attach a hierarchical instanced static mesh component that survives save.
+
+    Three routes, tried in order, because which ones exist moves between engine
+    versions and a silent failure here looks exactly like "the city did not
+    generate". The subobject subsystem is the sanctioned UE5 path; the other two
+    are there so a version mismatch degrades instead of stopping.
+    """
+    cls = unreal.HierarchicalInstancedStaticMeshComponent
+
+    try:
+        subsys = unreal.get_engine_subsystem(unreal.SubobjectDataSubsystem)
+        handles = subsys.k2_gather_subobject_data_for_instance(actor)
+        if handles:
+            params = unreal.AddNewSubobjectParams(
+                parent_handle=handles[0], new_class=cls, blueprint_context=None)
+            handle, fail = subsys.add_new_subobject(params)
+            # `fail` is the reason text, empty when it worked.
+            if hasattr(fail, "is_empty") and not fail.is_empty():
+                raise RuntimeError(str(fail))
+            subsys.rename_subobject(handle, name)
+            data = subsys.k2_find_subobject_data_from_handle(handle)
+            comp = unreal.SubobjectDataBlueprintFunctionLibrary.get_object(data)
+            if comp:
+                return comp
+    except Exception as exc:                                     # noqa: BLE001
+        warn("subobject route did not take ({})".format(exc))
+
+    try:
+        comp = actor.add_component_by_class(cls, False, unreal.Transform(), False)
+        if comp:
+            return comp
+    except Exception as exc:                                     # noqa: BLE001
+        warn("add_component_by_class did not take ({})".format(exc))
+
+    warn("could not attach an instanced mesh component to {}".format(
+        actor.get_actor_label()))
+    return None
+
+
+def _ism_holder(label, mesh, material):
+    """An empty actor carrying one instanced mesh, ready to be filled."""
+    sub = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+    actor = sub.spawn_actor_from_class(
+        unreal.Actor, unreal.Vector(0.0, 0.0, 0.0), unreal.Rotator())
+    if not actor:
+        return None, None
+    actor.set_actor_label(label)
+    comp = _add_ism_component(actor, "Instances")
+    if not comp:
+        sub.destroy_actor(actor)
+        return None, None
+    comp.set_static_mesh(mesh)
+    if material:
+        comp.set_material(0, material)
+    try:
+        comp.set_editor_property("mobility", unreal.ComponentMobility.STATIC)
+    except Exception:                                            # noqa: BLE001
+        pass
+    return actor, comp
+
+
+INSTANCE_CHUNK = 10000
+
+
+def _add_instances(comp, transforms):
+    """Batch if this build can, one at a time if it cannot.
+
+    Chunked rather than handed over in one call. A single component here takes
+    over a hundred thousand instances, and a batch that large gives the editor
+    no way to say how far it has got — the difference between "working" and
+    "hung" is a progress line. Chunking also means a failure part way through
+    is a partial result that can be reported, not a total loss.
+    """
+    added = 0
+    total = len(transforms)
+    for start in range(0, total, INSTANCE_CHUNK):
+        chunk = transforms[start:start + INSTANCE_CHUNK]
+        try:
+            comp.add_instances(chunk, False)
+            added += len(chunk)
+        except Exception:                                        # noqa: BLE001
+            for t in chunk:
+                try:
+                    comp.add_instance(t)
+                    added += 1
+                except Exception:                                # noqa: BLE001
+                    warn("instancing stopped after {} of {}".format(added, total))
+                    return added
+        if total > INSTANCE_CHUNK:
+            log("    {} / {}".format(added, total))
+    return added
+
+
+def _clear_city(prefix):
+    """Remove anything this command placed before, so it is safe to re-run."""
+    sub = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+    removed = 0
+    for a in sub.get_all_level_actors():
+        try:
+            if a.get_actor_label().startswith(prefix):
+                sub.destroy_actor(a)
+                removed += 1
+        except Exception:                                        # noqa: BLE001
+            continue
+    if removed:
+        log("cleared {} existing {} actor(s)".format(removed, prefix))
+    return removed
+
+
+def city_buildings(limit="0"):
+    """Place every building in the plan as an instance, grouped by kind."""
+    meta = _meta_for_level()
+    city = _load_city()
+    if not meta or not city or not city["_bin_path"]:
+        return False
+
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        limit = 0
+
+    mesh = unreal.EditorAssetLibrary.load_asset("/Engine/BasicShapes/Cube")
+    if not mesh:
+        warn("/Engine/BasicShapes/Cube is missing — cannot place buildings")
+        return False
+
+    import array
+    stride = int(city.get("buildingStride", 7))
+    count = int(city.get("buildingCount", 0))
+    data = array.array("f")
+    with open(city["_bin_path"], "rb") as fh:
+        data.fromfile(fh, count * stride)
+    if sys.byteorder != "little":
+        data.byteswap()
+
+    kinds = city.get("kinds", [])
+    field = _height_field(meta)
+    x0, y0, span_uu = _level_origin(meta)
+    res = meta["resolution"]
+    fm = meta["frameMetres"]
+    band = float(fm["height"]) / float(fm["width"])
+    v_off = (1.0 - band) / 2.0
+    scale_x = meta["unrealLandscapeScale"]["x"]
+
+    _clear_city(CITY_TAG + "_Buildings")
+
+    # Group by kind first, then fill one component per kind. Grouping keeps the
+    # instance buffers homogeneous, which is the whole point: one draw call per
+    # kind instead of one per building.
+    buckets = {}
+    n = count if limit <= 0 else min(count, limit)
+    for i in range(n):
+        o = i * stride
+        u = data[o]
+        v = data[o + 1]
+        rot = data[o + 2]
+        w = data[o + 3]
+        d = data[o + 4]
+        h = data[o + 5]
+        kind = kinds[int(data[o + 6])] if kinds else "house"
+
+        row_f = v_off + v * band
+        col = int(round(u * (res - 1)))
+        row = int(round(row_f * (res - 1)))
+        ground = _fast_metres(meta, field, col, row)
+        if ground is None or ground < 0.6:
+            continue                       # the plan says land, the terrain says sea
+
+        x = x0 + (u * span_uu)
+        y = y0 + (row_f * span_uu)
+        z = (ground - BUILDING_SINK_M + h / 2.0) * 100.0
+
+        t = unreal.Transform(
+            unreal.Vector(x, y, z),
+            unreal.Rotator(0.0, 0.0, rot),
+            unreal.Vector(w, d, h + BUILDING_SINK_M))
+        buckets.setdefault(kind, []).append(t)
+
+    placed = 0
+    for kind in sorted(buckets):
+        transforms = buckets[kind]
+        label = "{}_Buildings_{}".format(CITY_TAG, kind)
+        actor, comp = _ism_holder(label, mesh, _city_material(kind))
+        if not comp:
+            warn("skipped {} ({} buildings)".format(kind, len(transforms)))
+            continue
+        added = _add_instances(comp, transforms)
+        placed += added
+        log("  {:<11} {:>7} instances".format(kind, added))
+        if added != len(transforms):
+            warn("  {} of {} did not take".format(len(transforms) - added,
+                                                  len(transforms)))
+
+    log("placed {} buildings of {} in the plan".format(placed, count))
+    if placed == 0:
+        warn("nothing was placed. If the subobject route failed above, this")
+        warn("engine build cannot attach components from Python — say so rather")
+        warn("than assuming the plan is wrong.")
+        return False
+    log("Save with Ctrl+S. Then: ... build_sandiego.py look downtown")
+    return True
+
+
+def city_streets():
+    """Lay every surface street and arterial, following the ground."""
+    meta = _meta_for_level()
+    city = _load_city()
+    if not meta or not city:
+        return False
+
+    mesh = unreal.EditorAssetLibrary.load_asset("/Engine/BasicShapes/Cube")
+    if not mesh:
+        warn("/Engine/BasicShapes/Cube is missing — cannot lay streets")
+        return False
+
+    field = _height_field(meta)
+    x0, y0, span_uu = _level_origin(meta)
+    res = meta["resolution"]
+    fm = meta["frameMetres"]
+    frame_w = float(fm["width"])
+    band = float(fm["height"]) / frame_w
+    v_off = (1.0 - band) / 2.0
+    step_uv = STREET_STEP_M / frame_w
+
+    _clear_city(CITY_TAG + "_Streets")
+
+    def to_world(u, v):
+        row_f = v_off + v * band
+        col = int(round(u * (res - 1)))
+        row = int(round(row_f * (res - 1)))
+        ground = _fast_metres(meta, field, col, row)
+        return (x0 + u * span_uu, y0 + row_f * span_uu, ground)
+
+    # Arterials sit slightly higher than the residential streets they cross, so
+    # a junction reads as the arterial running through rather than as two
+    # surfaces fighting over the same z.
+    groups = [("arterial", city.get("arterials", []), 0.26),
+              ("street", city.get("streets", []), 0.18)]
+
+    total = 0
+    for group_name, items, lift in groups:
+        transforms = []
+        for item in items:
+            width_m = float(item.get("w", 10))
+            pts = item.get("pts", [])
+            if len(pts) < 2:
+                continue
+            walk = _resample([(p[0], p[1]) for p in pts], step_uv)
+            world = [to_world(u, v) for (u, v) in walk]
+            for i in range(len(world) - 1):
+                ax, ay, az = world[i]
+                bx, by, bz = world[i + 1]
+                if az is None or bz is None:
+                    continue
+                if az < 0.4 and bz < 0.4:
+                    continue                      # the run crossed water
+                dx, dy = bx - ax, by - ay
+                dz = (bz - az) * 100.0
+                run = math.sqrt(dx * dx + dy * dy)
+                length = math.sqrt(run * run + dz * dz)
+                if length < 1.0:
+                    continue
+                yaw = math.degrees(math.atan2(dy, dx))
+                pitch = math.degrees(math.asin(max(-1.0, min(1.0, dz / length))))
+                cz = ((az + bz) / 2.0 + lift) * 100.0
+                transforms.append(unreal.Transform(
+                    unreal.Vector((ax + bx) / 2.0, (ay + by) / 2.0, cz),
+                    unreal.Rotator(0.0, pitch, yaw),
+                    # Overlap along the run so joints do not gap on a curve.
+                    unreal.Vector((length + 120.0) / 100.0, width_m, 0.5)))
+
+        if not transforms:
+            continue
+        label = "{}_Streets_{}".format(CITY_TAG, group_name)
+        actor, comp = _ism_holder(label, mesh, _road_material())
+        if not comp:
+            warn("skipped {} ({} segments)".format(group_name, len(transforms)))
+            continue
+        added = _add_instances(comp, transforms)
+        total += added
+        log("  {:<9} {:>7} segments".format(group_name, added))
+
+    log("laid {} street segments".format(total))
+    if total == 0:
+        warn("nothing was laid — see the component warnings above")
+        return False
+    log("Save with Ctrl+S.")
+    return True
+
+
+def city(what="all", limit="0"):
+    """Streets then buildings. `city streets`, `city buildings [limit]`, `city`."""
+    what = (what or "all").strip().lower()
+    ok_streets = ok_buildings = True
+    if what in ("all", "streets"):
+        ok_streets = city_streets()
+    if what in ("all", "buildings"):
+        ok_buildings = city_buildings(limit)
+    return ok_streets and ok_buildings
+
+
+def city_report():
+    """What the plan contains, without touching the level."""
+    city_plan = _load_city()
+    if not city_plan:
+        return False
+    log("plan: {}".format(city_plan["_json_path"]))
+    log("frame {} x {} m".format(city_plan["frameMetres"]["width"],
+                                 city_plan["frameMetres"]["height"]))
+    log("{} districts, {} arterials, {} streets, {} buildings".format(
+        len(city_plan.get("districts", [])),
+        len(city_plan.get("arterials", [])),
+        len(city_plan.get("streets", [])),
+        city_plan.get("buildingCount", 0)))
+    log("kinds: {}".format(", ".join(city_plan.get("kinds", []))))
+    log("")
+    for s in city_plan.get("stats", []):
+        log("  {:<20} {:>5} streets {:>7} buildings".format(
+            s.get("id", "?"), s.get("streets", 0), s.get("buildings", 0)))
+    return True
+
+
 COMMANDS = {
     "report": report,
     "recipe": import_recipe,
@@ -1642,6 +2147,8 @@ COMMANDS = {
     "water": water,
     "material": material,
     "roads": roads,
+    "city": city,
+    "city-report": city_report,
     "sample": sample,
     "load": load_all,
     "wp-api": wp_api,

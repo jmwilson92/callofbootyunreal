@@ -27,9 +27,13 @@
 # generated — tools/export-heightmap.mjs in the callofbooty repo rebuilds them
 # from the traced geography — so they are reproducible rather than precious, and
 # there are three of them, not three thousand.
+# The same goes for the city plan's packed building buffer, which is generated
+# by tools/export-city.mjs and is the same kind of thing: reproducible, small,
+# and much better as a plain blob than as an LFS pointer nobody can pull.
 *.png     -text
 *.r16     -text
 *.raw     -text
+*.bin     -text
 
 # Text that should stay text and diff normally
 *.cpp     text
