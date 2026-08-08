@@ -43,3 +43,7 @@ Saved/Logs/
 
 *.slnx
 Visual Studio 2022/
+
+# Python bytecode from the editor scripts
+__pycache__/
+*.pyc
