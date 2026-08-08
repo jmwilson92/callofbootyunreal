@@ -162,7 +162,7 @@ def transform_for(meta):
 PLACES = [
     ("missionbeach", 0.070, 0.026), ("oceanbeach", 0.099, 0.213),
     ("sunsetcliffs", 0.101, 0.426), ("pointloma", 0.140, 0.620),
-    ("cabrillo", 0.150, 0.870), ("airport", 0.370, 0.337),
+    ("cabrillo", 0.160, 0.864), ("airport", 0.370, 0.337),
     ("oldtown", 0.508, 0.136), ("missionvalley", 0.658, 0.048),
     ("hillcrest", 0.589, 0.227), ("balboa", 0.710, 0.354),
     ("downtown", 0.611, 0.500), ("littleitaly", 0.569, 0.436),
