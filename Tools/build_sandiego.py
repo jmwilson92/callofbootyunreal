@@ -30,6 +30,8 @@ puts the whole city 60 m under the sea.
     place               transform our import, delete any impostor beside it
     probe               read elevations at 21 landmarks straight from the file
     look <place>        point the viewport at one of them
+    overview            camera 12 km up, looking straight down
+    water               lay a sea surface at Z=0 across the map
     templates           list the level templates this engine ships
 """
 
@@ -712,6 +714,154 @@ def place_landscape(delete_others="yes"):
     return True
 
 
+OCEAN_LABEL = "SanDiegoOcean"
+OCEAN_MATERIAL = "/Game/Materials/M_Ocean"
+
+
+def _ocean_material():
+    """A flat sea material, created once and reused.
+
+    Deliberately not the Water plugin. A WaterBodyOcean needs the plugin
+    enabled, a WaterZone actor, and a landscape set up to receive its terrain
+    carving — three more things to go wrong on a level that has already been
+    imported four times. A plane with a low-roughness material reads as ocean
+    from any altitude you would actually look at a 17.6 km map from, and it
+    cannot fail in a way that takes a screenshot to diagnose.
+    """
+    if unreal.EditorAssetLibrary.does_asset_exist(OCEAN_MATERIAL):
+        return unreal.EditorAssetLibrary.load_asset(OCEAN_MATERIAL)
+    try:
+        tools = unreal.AssetToolsHelpers.get_asset_tools()
+        mat = tools.create_asset(
+            OCEAN_MATERIAL.rsplit("/", 1)[1], OCEAN_MATERIAL.rsplit("/", 1)[0],
+            unreal.Material, unreal.MaterialFactoryNew())
+        mel = unreal.MaterialEditingLibrary
+
+        col = mel.create_material_expression(
+            mat, unreal.MaterialExpressionVectorParameter, -420, 0)
+        col.set_editor_property("parameter_name", "WaterColour")
+        # Deep water is much darker than people expect; most of what you see on
+        # real ocean is reflected sky, which the roughness below provides.
+        col.set_editor_property("default_value",
+                                unreal.LinearColor(0.010, 0.048, 0.098, 1.0))
+        mel.connect_material_property(col, "", unreal.MaterialProperty.MP_BASE_COLOR)
+
+        rough = mel.create_material_expression(
+            mat, unreal.MaterialExpressionScalarParameter, -420, 220)
+        rough.set_editor_property("parameter_name", "Roughness")
+        rough.set_editor_property("default_value", 0.055)
+        mel.connect_material_property(rough, "", unreal.MaterialProperty.MP_ROUGHNESS)
+
+        spec = mel.create_material_expression(
+            mat, unreal.MaterialExpressionScalarParameter, -420, 340)
+        spec.set_editor_property("parameter_name", "Specular")
+        spec.set_editor_property("default_value", 1.0)
+        mel.connect_material_property(spec, "", unreal.MaterialProperty.MP_SPECULAR)
+
+        mel.recompile_material(mat)
+        unreal.EditorAssetLibrary.save_asset(OCEAN_MATERIAL)
+        log("created {}".format(OCEAN_MATERIAL))
+        return mat
+    except Exception as exc:                                     # noqa: BLE001
+        warn("could not build the water material ({}) — the plane will be "
+             "default grey, which still shows you the coastline".format(exc))
+        return None
+
+
+def water():
+    """Lay a sea surface at Z=0 across the whole map.
+
+    Sea level is world Z=0 by construction — that is the entire reason the
+    landscape gets lifted 6000 uu on import — so the plane needs no fitting.
+    It is sized and centred from the landscape's real bounds rather than from
+    the intended ones, because those two have not always agreed.
+    """
+    meta = load_meta()
+    if not meta:
+        return False
+
+    span = (meta["resolution"] - 1) * meta["unrealLandscapeScale"]["x"]
+    cx = cy = 0.0
+    groups = [g for g in _landscape_groups()
+              if abs(g["res"] - meta["resolution"]) <= max(2, meta["resolution"] * 0.02)]
+    if groups:
+        cx = groups[0]["minCorner"][0] + span / 2.0
+        cy = groups[0]["minCorner"][1] + span / 2.0
+        log("centring the sea on the landscape at ({:.0f}, {:.0f})".format(cx, cy))
+    else:
+        warn("no landscape found — putting the sea on the origin")
+
+    sub = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+    for a in sub.get_all_level_actors():
+        try:
+            if a.get_actor_label() == OCEAN_LABEL:
+                sub.destroy_actor(a)
+        except Exception:                                        # noqa: BLE001
+            continue
+
+    mesh = unreal.EditorAssetLibrary.load_asset("/Engine/BasicShapes/Plane")
+    if not mesh:
+        warn("/Engine/BasicShapes/Plane is missing — cannot build the sea")
+        return False
+
+    actor = sub.spawn_actor_from_class(
+        unreal.StaticMeshActor, unreal.Vector(cx, cy, 0.0), unreal.Rotator(0, 0, 0))
+    actor.set_actor_label(OCEAN_LABEL)
+    comp = actor.static_mesh_component
+    comp.set_static_mesh(mesh)
+    mat = _ocean_material()
+    if mat:
+        comp.set_material(0, mat)
+    # The engine plane is 100 uu square. Overhang the map by 15% so there is
+    # open water past the coastline instead of a visible edge to the world.
+    s = (span * 1.15) / 100.0
+    actor.set_actor_scale3d(unreal.Vector(s, s, 1.0))
+    try:
+        comp.set_editor_property("cast_shadow", False)
+    except Exception:                                            # noqa: BLE001
+        pass
+
+    log("sea laid at Z=0, {:.1f} km across, centred on ({:.0f}, {:.0f})".format(
+        span * 1.15 / 100000.0, cx, cy))
+    log("Save with Ctrl+S. Then: ... build_sandiego.py overview")
+    return True
+
+
+def overview():
+    """Put the camera high enough to see the whole map at once.
+
+    Judging a 17.6 km coastline from 1.5 km up, at an angle, is how four
+    adjacent streaming proxies come to look like the same tile repeated. From
+    directly above the whole thing, the silhouette is either San Diego or it
+    is not, and no amount of flying around settles it faster.
+    """
+    meta = load_meta()
+    if not meta:
+        return False
+    span = (meta["resolution"] - 1) * meta["unrealLandscapeScale"]["x"]
+    cx = cy = 0.0
+    groups = [g for g in _landscape_groups()
+              if abs(g["res"] - meta["resolution"]) <= max(2, meta["resolution"] * 0.02)]
+    if groups:
+        cx = groups[0]["minCorner"][0] + span / 2.0
+        cy = groups[0]["minCorner"][1] + span / 2.0
+
+    eye = unreal.Vector(cx, cy, span * 0.72)
+    rot = unreal.Rotator(0.0, -89.0, -90.0)   # roll, pitch, yaw — looking down
+    try:
+        unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem)\
+            .set_level_viewport_camera_info(eye, rot)
+    except Exception as exc:                                     # noqa: BLE001
+        warn("could not move the viewport ({})".format(exc))
+        return False
+    log("looking straight down from {:.1f} km over ({:.0f}, {:.0f})".format(
+        span * 0.72 / 100000.0, cx, cy))
+    log("Point Loma hooks south on the west side, Coronado closes the bay")
+    log("behind it, and the mesas sit north and east. If that is not what you")
+    log("see, the terrain is wrong rather than the camera.")
+    return True
+
+
 COMMANDS = {
     "report": report,
     "recipe": import_recipe,
@@ -721,6 +871,8 @@ COMMANDS = {
     "identify": identify,
     "probe": probe,
     "look": look,
+    "overview": overview,
+    "water": water,
     "templates": list_templates,
 }
 
