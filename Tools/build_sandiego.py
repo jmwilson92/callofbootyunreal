@@ -653,7 +653,7 @@ def _landscape_groups():
 
 def identify():
     """List each logical landscape with the resolution its geometry implies."""
-    meta = load_meta()
+    meta = _meta_for_level()
     want = meta["resolution"] if meta else None
     groups = _landscape_groups()
     if not groups:
@@ -821,7 +821,7 @@ def water():
     It is sized and centred from the landscape's real bounds rather than from
     the intended ones, because those two have not always agreed.
     """
-    meta = load_meta()
+    meta = _meta_for_level()
     if not meta:
         return False
 
@@ -880,7 +880,7 @@ def overview():
     directly above the whole thing, the silhouette is either San Diego or it
     is not, and no amount of flying around settles it faster.
     """
-    meta = load_meta()
+    meta = _meta_for_level()
     if not meta:
         return False
     span = (meta["resolution"] - 1) * meta["unrealLandscapeScale"]["x"]
@@ -937,7 +937,7 @@ def sample(unused=None):
     file's answers the question directly: if the level is the top quarter
     repeated, its rows repeat and the file's do not.
     """
-    meta = load_meta()
+    meta = _meta_for_level()
     if not meta:
         return False
     groups = [g for g in _landscape_groups()
@@ -1015,6 +1015,60 @@ def sample(unused=None):
     return True
 
 
+def _all_metas():
+    """Every heightmap sidecar in the folder, best-resolution-first.
+
+    There is more than one now — 4033 and 2017 — and a command that always
+    reads the first one compares the level against a file it was not built
+    from, then reports the mismatch as a broken import. Which has happened.
+    """
+    out = []
+    try:
+        names = sorted(os.listdir(HEIGHTMAP_DIR))
+    except Exception:                                            # noqa: BLE001
+        return out
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        base = os.path.join(HEIGHTMAP_DIR, name[:-5])
+        try:
+            with open(base + ".json", "r") as fh:
+                meta = json.load(fh)
+            res = meta["resolution"]
+        except Exception:                                        # noqa: BLE001
+            continue
+        raw = base + ".r16"
+        if not os.path.exists(raw) or os.path.getsize(raw) != res * res * 2:
+            continue
+        meta["_raw_path"] = os.path.abspath(raw)
+        png = base + ".png"
+        meta["_png_path"] = os.path.abspath(png) if os.path.exists(png) else None
+        out.append(meta)
+    return out
+
+
+def _meta_for_level():
+    """The sidecar matching the landscape actually in the level.
+
+    Falls back to the default when nothing matches, but says so — comparing a
+    2017 level against the 4033 file produces a confident, wrong answer.
+    """
+    metas = _all_metas()
+    if not metas:
+        return load_meta()
+    groups = _landscape_groups()
+    for g in groups:
+        for m in metas:
+            if abs(g["res"] - m["resolution"]) <= max(2, m["resolution"] * 0.02):
+                return m
+    if groups:
+        warn("the landscape here reads as ~{} x {}, which matches none of the "
+             "heightmaps present ({}).".format(
+                 groups[0]["res"], groups[0]["res"],
+                 ", ".join(str(m["resolution"]) for m in metas)))
+    return load_meta()
+
+
 def load_all():
     """Load every World Partition actor, so the level in memory is the level.
 
@@ -1063,7 +1117,13 @@ def load_all():
 
     n = len(_find_landscapes())
     log("landscape actors visible to Python: {}".format(n))
-    if not loaded:
+    if n:
+        log("{} actors are loaded — commands that read the level will see them."
+            .format(n))
+        for g in _landscape_groups():
+            log("  {} reads as ~{} x {} across {} actors".format(
+                g["label"], g["res"], g["res"], len(g["members"])))
+    if not loaded and not n:
         warn("could not load regions from script on this build. Do it in the UI:")
         warn("  Window -> World Partition -> World Partition Editor")
         warn("  drag a box over the whole minimap, right-click -> Load Region")
