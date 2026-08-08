@@ -629,7 +629,11 @@ def _landscape_groups():
             if not b:
                 continue
             origin, extent = b
-            if extent.x <= 1.0:                 # the geometry-less parent
+            # The parent of a streamed landscape carries no geometry and
+            # measures about zero; skip it so it does not drag the bounds. But
+            # a landscape imported at World Partition Grid Size 0 has no
+            # proxies and IS its own single actor, so there is nothing to skip.
+            if len(g["members"]) > 1 and extent.x <= 1.0:
                 continue
             lo_x = min(lo_x, origin.x - extent.x)
             lo_y = min(lo_y, origin.y - extent.y)
@@ -834,7 +838,15 @@ def water():
         cy = groups[0]["minCorner"][1] + span / 2.0
         log("centring the sea on the landscape at ({:.0f}, {:.0f})".format(cx, cy))
     else:
-        warn("no landscape found — putting the sea on the origin")
+        found = _find_landscapes()
+        if found:
+            loc = found[0].get_actor_location()
+            cx = loc.x + span / 2.0
+            cy = loc.y + span / 2.0
+            log("single landscape actor (no streaming proxies); centring the "
+                "sea on ({:.0f}, {:.0f})".format(cx, cy))
+        else:
+            warn("no landscape in this level — putting the sea on the origin")
 
     sub = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
     for a in sub.get_all_level_actors():
@@ -1060,6 +1072,16 @@ def _meta_for_level():
     for g in groups:
         for m in metas:
             if abs(g["res"] - m["resolution"]) <= max(2, m["resolution"] * 0.02):
+                return m
+    # Bounds can come back degenerate on a single-actor landscape. Scale is
+    # unambiguous either way: 436.508 is the 4033 map, 873.016 is the 2017 one.
+    for a in _find_landscapes():
+        try:
+            sx = a.get_actor_scale3d().x
+        except Exception:                                        # noqa: BLE001
+            continue
+        for m in metas:
+            if abs(sx - m["unrealLandscapeScale"]["x"]) < 0.5:
                 return m
     if groups:
         warn("the landscape here reads as ~{} x {}, which matches none of the "
