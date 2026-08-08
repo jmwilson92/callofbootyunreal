@@ -33,6 +33,7 @@ puts the whole city 60 m under the sea.
     overview            camera 12 km up, looking straight down
     water               lay a sea surface at Z=0 across the map
     material            colour the terrain by height and slope
+    roads               lay the freeways along the traced routes
     sample              compare the level against the file, per tile
     load                load every World Partition actor first
     wp-api              list the World Partition bindings this build has
@@ -40,6 +41,7 @@ puts the whole city 60 m under the sea.
 """
 
 import json
+import math
 import os
 
 import unreal
@@ -1397,6 +1399,199 @@ def material():
     return True
 
 
+ROAD_MATERIAL = "/Game/Materials/M_Road"
+ROAD_TAG = "SanDiegoFreeway"
+
+# The real corridors, traced from the reference map, in the same normalised
+# (u, v) as everything else. Widths are metres.
+FREEWAYS = [
+    ("i5", 26, [
+        (0.340, 0.000), (0.360, 0.060), (0.400, 0.140), (0.450, 0.230),
+        (0.505, 0.300), (0.545, 0.360), (0.575, 0.420), (0.605, 0.470),
+        (0.650, 0.530), (0.720, 0.600), (0.790, 0.660), (0.860, 0.720),
+        (0.930, 0.780)]),
+    ("i8", 24, [
+        (0.240, 0.140), (0.330, 0.108), (0.450, 0.078), (0.580, 0.056),
+        (0.720, 0.040), (0.860, 0.028), (1.000, 0.020)]),
+    ("i15", 22, [
+        (0.880, 0.000), (0.885, 0.100), (0.890, 0.200), (0.888, 0.300),
+        (0.878, 0.400), (0.860, 0.470), (0.830, 0.530)]),
+    ("i805", 22, [
+        (0.800, 0.000), (0.820, 0.090), (0.845, 0.180), (0.868, 0.270),
+        (0.885, 0.360), (0.900, 0.460), (0.915, 0.560), (0.930, 0.660),
+        (0.945, 0.770)]),
+    ("sr163", 18, [
+        (0.700, 0.045), (0.680, 0.130), (0.664, 0.215), (0.648, 0.300),
+        (0.628, 0.400)]),
+    ("sr94", 18, [
+        (0.660, 0.500), (0.730, 0.510), (0.800, 0.525), (0.880, 0.540),
+        (0.960, 0.555)]),
+    # SR-75, the Coronado bridge: downtown across the bay to the island. It is
+    # the one stretch that must not follow the ground, because the ground under
+    # it is the bay.
+    ("sr75", 16, [
+        (0.640, 0.545), (0.600, 0.590), (0.560, 0.640), (0.520, 0.690),
+        (0.492, 0.735)]),
+]
+
+SEGMENT_METRES = 160.0
+
+
+def _road_material():
+    """Dark asphalt. Deliberately duller than the ground so the routes read."""
+    if unreal.EditorAssetLibrary.does_asset_exist(ROAD_MATERIAL):
+        return unreal.EditorAssetLibrary.load_asset(ROAD_MATERIAL)
+    try:
+        tools = unreal.AssetToolsHelpers.get_asset_tools()
+        folder, name = ROAD_MATERIAL.rsplit("/", 1)
+        mat = tools.create_asset(name, folder, unreal.Material,
+                                 unreal.MaterialFactoryNew())
+        col = _expr(mat, "MaterialExpressionVectorParameter", -420, 0)
+        col.set_editor_property("parameter_name", "Asphalt")
+        col.set_editor_property("default_value",
+                                unreal.LinearColor(0.030, 0.029, 0.031, 1.0))
+        unreal.MaterialEditingLibrary.connect_material_property(
+            col, "", unreal.MaterialProperty.MP_BASE_COLOR)
+        rough = _expr(mat, "MaterialExpressionScalarParameter", -420, 200)
+        rough.set_editor_property("parameter_name", "Roughness")
+        rough.set_editor_property("default_value", 0.72)
+        unreal.MaterialEditingLibrary.connect_material_property(
+            rough, "", unreal.MaterialProperty.MP_ROUGHNESS)
+        unreal.MaterialEditingLibrary.recompile_material(mat)
+        unreal.EditorAssetLibrary.save_asset(ROAD_MATERIAL)
+        log("built {}".format(ROAD_MATERIAL))
+        return mat
+    except Exception as exc:                                     # noqa: BLE001
+        warn("could not build the road material ({})".format(exc))
+        return None
+
+
+def _resample(pts, step_uv):
+    """Walk a polyline at a fixed spacing, so segments follow the ground."""
+    out = []
+    for i in range(len(pts) - 1):
+        (ax, ay), (bx, by) = pts[i], pts[i + 1]
+        span = math.hypot(bx - ax, by - ay)
+        n = max(1, int(math.ceil(span / step_uv)))
+        for k in range(n):
+            t = k / float(n)
+            out.append((ax + (bx - ax) * t, ay + (by - ay) * t))
+    out.append(pts[-1])
+    return out
+
+
+def roads():
+    """Lay the freeways on the terrain, following the heightmap.
+
+    Heights come from the .r16 rather than from a trace: editor-world line
+    traces do not hit landscape collision, which is why the first version of
+    `sample` measured nothing. Reading the file gives the same answer without
+    depending on the editor at all.
+    """
+    meta = _meta_for_level()
+    if not meta:
+        return False
+
+    res = meta["resolution"]
+    span_uu = (res - 1) * meta["unrealLandscapeScale"]["x"]
+    x0 = y0 = -span_uu / 2.0
+    groups = [g for g in _landscape_groups()
+              if abs(g["res"] - meta["resolution"]) <= max(2, meta["resolution"] * 0.02)]
+    if groups:
+        x0, y0 = groups[0]["minCorner"]
+    else:
+        found = _find_landscapes()
+        if found:
+            loc = found[0].get_actor_location()
+            x0, y0 = loc.x, loc.y
+
+    sub = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+    removed = 0
+    for a in sub.get_all_level_actors():
+        try:
+            if a.get_actor_label().startswith(ROAD_TAG):
+                sub.destroy_actor(a)
+                removed += 1
+        except Exception:                                        # noqa: BLE001
+            continue
+    if removed:
+        log("cleared {} existing road pieces".format(removed))
+
+    mesh = unreal.EditorAssetLibrary.load_asset("/Engine/BasicShapes/Cube")
+    if not mesh:
+        warn("/Engine/BasicShapes/Cube is missing — cannot build roads")
+        return False
+    mat = _road_material()
+
+    frame_w = float(meta["frameMetres"]["width"])
+    step_uv = SEGMENT_METRES / frame_w
+    placed = 0
+
+    for name, width_m, pts in FREEWAYS:
+        walk = _resample(pts, step_uv)
+        # The Coronado bridge spans open water; holding it level is the whole
+        # point of a bridge, and following the seabed would put it underwater.
+        bridge = name == "sr75"
+        deck = None
+        if bridge:
+            deck = 62.0                     # metres above sea level
+
+        world = []
+        for u, v in walk:
+            p = uv_to_world(meta, u, v)
+            h = _sample_metres(meta, p["col"], p["row"])
+            if h is None:
+                h = 0.0
+            z = deck if bridge else max(h, 0.0) + 1.6
+            world.append((x0 + (p["x"] + span_uu / 2.0),
+                          y0 + (p["y"] + span_uu / 2.0),
+                          z * 100.0))
+
+        # Smooth the profile. Laid straight onto the heightfield the routes
+        # climb mesa escarpments at 27 degrees, because that is what the ground
+        # does there — but a freeway cuts and fills rather than following a
+        # cliff. A few averaging passes bring the worst grades under control
+        # without needing real earthworks.
+        if not bridge and len(world) > 2:
+            for _ in range(6):
+                smoothed = list(world)
+                for k in range(1, len(world) - 1):
+                    z = (world[k - 1][2] + world[k][2] * 2.0 + world[k + 1][2]) / 4.0
+                    smoothed[k] = (world[k][0], world[k][1], z)
+                world = smoothed
+
+        for i in range(len(world) - 1):
+            ax, ay, az = world[i]
+            bx, by, bz = world[i + 1]
+            dx, dy, dz = bx - ax, by - ay, bz - az
+            length = math.sqrt(dx * dx + dy * dy + dz * dz)
+            if length < 1.0:
+                continue
+            yaw = math.degrees(math.atan2(dy, dx))
+            pitch = math.degrees(math.asin(max(-1.0, min(1.0, dz / length))))
+
+            actor = sub.spawn_actor_from_class(
+                unreal.StaticMeshActor,
+                unreal.Vector((ax + bx) / 2.0, (ay + by) / 2.0, (az + bz) / 2.0),
+                unreal.Rotator(0.0, pitch, yaw))
+            actor.set_actor_label("{}_{}_{}".format(ROAD_TAG, name, i))
+            comp = actor.static_mesh_component
+            comp.set_static_mesh(mesh)
+            if mat:
+                comp.set_material(0, mat)
+            # The engine cube is 100 uu on a side.
+            actor.set_actor_scale3d(unreal.Vector(
+                (length + 200.0) / 100.0,       # overlap so joints do not gap
+                (width_m * 100.0) / 100.0,
+                0.6))
+            placed += 1
+
+    log("laid {} road pieces across {} freeways".format(placed, len(FREEWAYS)))
+    log("I-5 down the coast, I-8 through Mission Valley, SR-75 over the bay to")
+    log("Coronado at 62 m. Save with Ctrl+S, then: ... build_sandiego.py look downtown")
+    return True
+
+
 COMMANDS = {
     "report": report,
     "recipe": import_recipe,
@@ -1409,6 +1604,7 @@ COMMANDS = {
     "overview": overview,
     "water": water,
     "material": material,
+    "roads": roads,
     "sample": sample,
     "load": load_all,
     "wp-api": wp_api,
