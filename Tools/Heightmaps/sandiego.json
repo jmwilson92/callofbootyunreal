@@ -19,5 +19,6 @@
     "y": 436.508,
     "z": 46.875
   },
-  "note": "Import as 16-bit raw. Set the XYZ scale above. Z scale reproduces the -60..180 m range: Unreal maps full 16-bit onto 512 uu at Z=100, so scale = range_cm / 512. Sea level lands at 16383 of 65535."
+  "unrealLandscapeZOffsetUU": 6000.2,
+  "note": "Import as 16-bit raw. Set the XYZ scale above and lift the actor by unrealLandscapeZOffsetUU. Z scale reproduces the -60..180 m range: one unit of landscape Z scale spans 512 m of the 16-bit range, so scale = range_m * 100 / 512. Sea level lands at 16383 of 65535."
 }

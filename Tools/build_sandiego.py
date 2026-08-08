@@ -308,4 +308,30 @@ def place_landscape():
     return True
 
 
-report()
+COMMANDS = {
+    "report": report,
+    "recipe": import_recipe,
+    "open-world": make_open_world,
+    "place": place_landscape,
+}
+
+
+def _dispatch():
+    """`py "<this file>" <command>` — so nothing here needs the Python console.
+
+    Unreal's `py` console command forwards trailing arguments as sys.argv, which
+    means every entry point is reachable from the Cmd prompt. That matters more
+    than it looks: the dropdown defaulting to Cmd is what made the first attempt
+    at running this fail as a "deprecated command".
+    """
+    import sys
+    argv = [a for a in getattr(sys, "argv", [])[1:] if not a.lower().endswith(".py")]
+    name = argv[0].strip().lower() if argv else "report"
+    fn = COMMANDS.get(name)
+    if not fn:
+        warn("unknown command '{}'. Try: {}".format(name, ", ".join(COMMANDS)))
+        return
+    fn()
+
+
+_dispatch()
