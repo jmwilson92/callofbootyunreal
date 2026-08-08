@@ -10,13 +10,26 @@
 *.uexp    filter=lfs diff=lfs merge=lfs -text
 *.upack   filter=lfs diff=lfs merge=lfs -text
 
-# Source art and heightmaps
+# Source art
 *.fbx     filter=lfs diff=lfs merge=lfs -text
-*.png     filter=lfs diff=lfs merge=lfs -text
 *.tga     filter=lfs diff=lfs merge=lfs -text
 *.wav     filter=lfs diff=lfs merge=lfs -text
-*.r16     filter=lfs diff=lfs merge=lfs -text
-*.raw     filter=lfs diff=lfs merge=lfs -text
+
+# Heightmaps are deliberately NOT LFS.
+#
+# They were committed as ordinary blobs, and declaring them LFS while the
+# history holds plain content makes every clone with git-lfs installed report
+# them as locally modified: the clean filter turns the working file into a
+# pointer, which does not match the stored blob. `git pull` then refuses to
+# merge over "local changes" nobody made.
+#
+# Keeping them as blobs is also the right call on the merits. They are
+# generated — tools/export-heightmap.mjs in the callofbooty repo rebuilds them
+# from the traced geography — so they are reproducible rather than precious, and
+# there are three of them, not three thousand.
+*.png     -text
+*.r16     -text
+*.raw     -text
 
 # Text that should stay text and diff normally
 *.cpp     text
