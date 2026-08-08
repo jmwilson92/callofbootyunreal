@@ -1206,15 +1206,20 @@ def _wire(a, a_out, b, b_in):
     the default grey — and the script reported success. Silent failures have
     cost more today than loud ones.
     """
-    ok = False
-    try:
-        ok = bool(unreal.MaterialEditingLibrary.connect_material_expressions(
-            a, a_out, b, b_in))
-    except Exception as exc:                                     # noqa: BLE001
-        warn("connect {} -> {} raised ({})".format(a_out or "out", b_in, exc))
-    if not ok:
-        _WIRE_FAILURES.append("{} -> {}".format(a_out or "out", b_in))
-    return ok
+    # b_in may be several candidate pin names. Unreal names a node's single
+    # unnamed input "" rather than "Input" — which is why Clamp failed, and
+    # then ComponentMask failed the same way one commit later. Trying the
+    # plausible names beats discovering them one compile error at a time.
+    names = (b_in,) if isinstance(b_in, str) else tuple(b_in)
+    for name in names:
+        try:
+            if unreal.MaterialEditingLibrary.connect_material_expressions(
+                    a, a_out, b, name):
+                return True
+        except Exception as exc:                                 # noqa: BLE001
+            warn("connect {} -> {} raised ({})".format(a_out or "out", name, exc))
+    _WIRE_FAILURES.append("{} -> {}".format(a_out or "out", "/".join(names)))
+    return False
 
 
 def _saturate(mat, src, x, y):
@@ -1268,7 +1273,7 @@ def _land_material():
     metres = _expr(mat, "MaterialExpressionDivide", -1150, -200, const_b=100.0)
     if not (wp and z and metres):
         return mat
-    _wire(wp, "", z, "Input")
+    _wire(wp, "", z, ("", "Input"))
     _wire(z, "", metres, "A")
 
     # Beach -> scrub over the first few metres of dry land.
@@ -1302,7 +1307,7 @@ def _land_material():
     steep = _expr(mat, "MaterialExpressionMultiply", -950, 300)
     c_slope = None
     if nrm and nz and inv and steep:
-        _wire(nrm, "", nz, "Input")
+        _wire(nrm, "", nz, ("", "Input"))
         _wire(nz, "", inv, "B")
         _wire(inv, "", steep, "A")
         _wire(gain, "", steep, "B")
