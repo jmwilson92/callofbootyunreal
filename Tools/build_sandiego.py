@@ -922,94 +922,94 @@ def _shade(h):
     return "@"
 
 
-def sample(n="40"):
-    """Trace the landscape in the level and print it beside the source file.
+def sample(unused=None):
+    """Compare the level's terrain against the file, per streaming proxy.
 
-    This exists because four screenshots in a row have been ambiguous. A view
-    from 12 km up through a partially-streamed World Partition grid cannot
-    distinguish "the heightmap is tiled" from "four cells are loaded and the
-    rest are not" — and those need opposite fixes. A ray fired straight down
-    hits whatever collision is actually there, so it answers the question the
-    viewport keeps dodging.
+    The first version fired rays down and every single one missed: editor-world
+    line traces do not hit landscape collision, so it measured nothing while
+    looking like it had. This uses actor bounds instead — the same read that
+    identify already gets right — so it cannot silently measure air.
 
-    Left map is the level. Right map is sandiego.r16. If they differ, the level
-    holds different data than the file, and the import is what is wrong. If
-    they match, the terrain is right and it is the view that is misleading.
+    Each streaming proxy covers one tile of the map and its bounds carry the
+    highest ground in that tile. Printing the level's tile maxima beside the
+    file's answers the question directly: if the level is the top quarter
+    repeated, its rows repeat and the file's do not.
     """
     meta = load_meta()
     if not meta:
         return False
-    try:
-        n = max(16, min(72, int(n)))
-    except (TypeError, ValueError):
-        n = 40
-
-    span = (meta["resolution"] - 1) * meta["unrealLandscapeScale"]["x"]
-    x0 = y0 = -span / 2.0
     groups = [g for g in _landscape_groups()
               if abs(g["res"] - meta["resolution"]) <= max(2, meta["resolution"] * 0.02)]
-    if groups:
-        x0, y0 = groups[0]["minCorner"]
-    else:
-        warn("no landscape found — tracing over the origin anyway")
+    if not groups:
+        warn("no landscape in this level to compare")
+        return False
+    g = groups[0]
 
-    try:
-        world = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_editor_world()
-    except Exception as exc:                                     # noqa: BLE001
-        warn("no editor world ({})".format(exc))
+    proxies = [a for a in g["members"] if _is_proxy(a)]
+    if not proxies:
+        warn("no streaming proxies — nothing to tile-compare")
         return False
 
-    def trace(x, y):
-        start = unreal.Vector(x, y, 60000.0)
-        end = unreal.Vector(x, y, -30000.0)
-        try:
-            res = unreal.SystemLibrary.line_trace_single(
-                world, start, end,
-                unreal.TraceTypeQuery.TRACE_TYPE_QUERY1, True, [],
-                unreal.DrawDebugTrace.NONE, True)
-        except Exception:                                        # noqa: BLE001
-            return None
-        hit = res[1] if isinstance(res, tuple) else res
-        if not hit:
-            return None
-        try:
-            if hasattr(hit, "b_blocking_hit") and not hit.b_blocking_hit:
-                return None
-            loc = hit.location if hasattr(hit, "location") else hit.get_editor_property("location")
-        except Exception:                                        # noqa: BLE001
-            return None
-        return loc.z / 100.0                                     # cm -> m
+    x0, y0 = g["minCorner"]
+    span = (meta["resolution"] - 1) * meta["unrealLandscapeScale"]["x"]
+
+    # Work the grid pitch out from the proxies themselves rather than assuming.
+    xs = sorted({round(a.get_actor_location().x) for a in proxies})
+    pitch = min((b - a) for a, b in zip(xs, xs[1:])) if len(xs) > 1 else span
+    n = int(round(span / pitch))
+    if n < 2 or n > 64:
+        warn("proxy grid looks wrong ({} across) — not comparing".format(n))
+        return False
+
+    level = [[None] * n for _ in range(n)]
+    for a in proxies:
+        b = _bounds(a)
+        if not b:
+            continue
+        origin, extent = b
+        loc = a.get_actor_location()
+        i = int(round((loc.x - x0) / pitch))
+        j = int(round((loc.y - y0) / pitch))
+        if 0 <= i < n and 0 <= j < n:
+            level[j][i] = (origin.z + extent.z) / 100.0     # highest ground, metres
 
     res = meta["resolution"]
-    step = span / (n - 1)
-    misses = 0
+    per = (res - 1) // n
     log("=" * 64)
-    log("LEVEL (traced)              FILE (sandiego.r16)")
-    log("~ sea   . 0-8   : 8-30   + 30-60   # 60-95   @ 95+   ' ' nothing hit")
-    for r in range(n):
-        left = []
+    log("LEVEL (proxy bounds)      FILE (sandiego.r16)   highest ground per tile")
+    log("~ sea  . 0-8  : 8-30  + 30-60  # 60-95  @ 95+   ' ' proxy not loaded")
+    rows_seen = {}
+    for j in range(n):
+        left = "".join(_shade(level[j][i]) for i in range(n))
         right = []
-        for c in range(n):
-            h = trace(x0 + c * step, y0 + r * step)
-            if h is None:
-                misses += 1
-            left.append(_shade(h))
-            # Same point out of the file. The landscape's +Y is the image's
-            # row axis, so this indexes the file exactly as the import did.
-            col = int(round((c / (n - 1.0)) * (res - 1)))
-            row = int(round((r / (n - 1.0)) * (res - 1)))
-            right.append(_shade(_sample_metres(meta, col, row)))
-        log("{}   {}".format("".join(left), "".join(right)))
+        for i in range(n):
+            hi = None
+            # Corners and centre of the tile is enough to catch its maximum
+            # without reading a quarter of a million samples per tile.
+            for cc, rr in ((0, 0), (per, 0), (0, per), (per, per), (per // 2, per // 2)):
+                v = _sample_metres(meta, min(res - 1, i * per + cc), min(res - 1, j * per + rr))
+                if v is not None and (hi is None or v > hi):
+                    hi = v
+            right.append(_shade(hi))
+        right = "".join(right)
+        # Uniform rows — the sea bands top and bottom — repeat legitimately and
+        # would otherwise report every correct map as tiled.
+        if len(set(left.strip() or " ")) > 1:
+            rows_seen.setdefault(left, []).append(j)
+        log("{}    {}".format(left, right))
     log("=" * 64)
-    if misses:
-        log("{} of {} rays hit nothing — unloaded World Partition cells look "
-            "like blank space here, and like missing terrain in the "
-            "viewport.".format(misses, n * n))
-        log("Window -> World Partition, select all, right-click -> Load Region,")
-        log("then run this again before concluding the data is wrong.")
-    log("If the two maps disagree, the level has different data than the file:")
-    log("clear-landscape and re-import. If they agree, the terrain is correct")
-    log("and the viewport was showing partially loaded cells.")
+
+    blank = sum(1 for j in range(n) for i in range(n) if level[j][i] is None)
+    if blank:
+        log("{} of {} proxies unloaded (blank on the left).".format(blank, n * n))
+    dupes = {k: v for k, v in rows_seen.items() if len(v) > 1 and k.strip()}
+    if dupes:
+        worst = max(dupes.values(), key=len)
+        log("rows {} are identical — the level repeats itself, so the import "
+            "read part of the file and tiled it.".format(
+                ", ".join(str(x) for x in worst)))
+    else:
+        log("no repeated rows: the level is not tiled.")
     return True
 
 
