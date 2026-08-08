@@ -41,7 +41,34 @@ import os
 import unreal
 
 
-HEIGHTMAP_DIR = os.path.join(unreal.Paths.project_dir(), "Tools", "Heightmaps")
+def _heightmap_dir():
+    """Where the heightmaps actually are, which is not always the open project.
+
+    This used to be project_dir()/Tools/Heightmaps. Unreal copies a project
+    when you open it under a different engine version — "callofbooty 5.8 - 2"
+    beside "callofbooty" — and the copy carries a snapshot of whatever the
+    heightmaps were at the time. Every export and every git pull went to the
+    original; every import read the copy. The terrain therefore could not
+    change no matter how many times it was re-imported, and nothing in the log
+    said why, because both folders contained a perfectly valid 4033 heightmap.
+
+    So: prefer the copy sitting beside this script, since the script is run by
+    full path out of the git working tree and that is the one being updated.
+    """
+    candidates = []
+    try:
+        candidates.append(os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "Heightmaps"))
+    except NameError:                       # exec() with no __file__
+        pass
+    candidates.append(os.path.join(unreal.Paths.project_dir(), "Tools", "Heightmaps"))
+    for c in candidates:
+        if os.path.exists(os.path.join(c, "sandiego.json")):
+            return c
+    return candidates[0] if candidates else ""
+
+
+HEIGHTMAP_DIR = _heightmap_dir()
 
 # Where the open world map lives. Content-relative, as Unreal package paths.
 MAP_PACKAGE = "/Game/Maps/Lvl_SanDiego"
@@ -326,7 +353,22 @@ def report():
     """Read-only survey: engine, level, landscape, heightmap. Changes nothing."""
     log("=" * 64)
     log("engine version : {}".format(unreal.SystemLibrary.get_engine_version()))
-    log("project dir    : {}".format(unreal.Paths.project_dir()))
+    proj = unreal.Paths.project_dir()
+    log("project dir    : {}".format(proj))
+    log("heightmap dir  : {}".format(HEIGHTMAP_DIR))
+    # These two disagreeing is not cosmetic: it means imports and exports are
+    # looking at different files, which is invisible unless something says so.
+    try:
+        proj_hm = os.path.normpath(os.path.join(proj, "Tools", "Heightmaps"))
+        if os.path.normpath(HEIGHTMAP_DIR) != proj_hm:
+            warn("the open project is NOT where these heightmaps live.")
+            warn("  reading  : {}".format(HEIGHTMAP_DIR))
+            warn("  project  : {}".format(proj_hm))
+            warn("Unreal copies a project when the engine version changes, and")
+            warn("the copy keeps an old heightmap. Work in the git checkout, or")
+            warn("copy Tools/Heightmaps across, or the import cannot change.")
+    except Exception:                                            # noqa: BLE001
+        pass
 
     try:
         world = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_editor_world()
