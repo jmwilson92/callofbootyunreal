@@ -56,6 +56,7 @@ def load_meta():
     """The exporter's sidecar, or None with a reason logged."""
     meta_path = os.path.join(HEIGHTMAP_DIR, "sandiego.json")
     raw_path = os.path.join(HEIGHTMAP_DIR, "sandiego.r16")
+    png_path = os.path.join(HEIGHTMAP_DIR, "sandiego.png")
     if not os.path.exists(meta_path) or not os.path.exists(raw_path):
         warn("MISSING heightmap. Expected: {}".format(raw_path))
         return None
@@ -69,6 +70,21 @@ def load_meta():
             actual, expected))
         return None
     meta["_raw_path"] = os.path.abspath(raw_path)
+
+    # Prefer the PNG. A headerless .r16 makes Unreal go looking for a sidecar
+    # declaring width/height/bpp, and it looks for it at sandiego.json — the same
+    # path this project already used for its own metadata. When those fields were
+    # missing the import did not complain: it reported "(Invalid)" resolution and
+    # offered a default 505x505 landscape, which is a much worse failure than an
+    # error. PNG carries its own header and sidesteps the whole question.
+    meta["_png_path"] = os.path.abspath(png_path) if os.path.exists(png_path) else None
+    if not meta["_png_path"]:
+        warn("no sandiego.png — re-run tools/export-heightmap.mjs and re-pull. "
+             "The .r16 will work, but only because the sidecar now declares "
+             "width/height/bpp.")
+    if "width" not in meta or "bpp" not in meta:
+        warn("sidecar has no width/bpp fields: an .r16 import from this folder "
+             "will silently fall back to a default landscape. Import the .png.")
     return meta
 
 
@@ -199,8 +215,9 @@ def report():
     res = meta["resolution"]
     lay = component_layout(res)
     tr = transform_for(meta)
-    log("heightmap      : {} x {}  ({:.1f} MB)".format(
-        res, res, os.path.getsize(meta["_raw_path"]) / 1048576.0))
+    src = meta["_png_path"] or meta["_raw_path"]
+    log("heightmap      : {} x {}  ({:.1f} MB, {})".format(
+        res, res, os.path.getsize(src) / 1048576.0, os.path.basename(src)))
     log("  frame        : {} x {} m".format(
         meta["frameMetres"]["width"], meta["frameMetres"]["height"]))
     log("  heights      : {}..{} m observed, {}..{} m encoded".format(
@@ -235,7 +252,9 @@ def import_recipe():
     log("=" * 64)
     log("LANDSCAPE IMPORT — type these, do not let the dialog guess")
     log("  1. Landscape mode (Ctrl+Shift+2) -> Manage -> New -> Import from File")
-    log("  2. Heightmap File : {}".format(meta["_raw_path"]))
+    log("  2. Heightmap File : {}".format(meta["_png_path"] or meta["_raw_path"]))
+    if meta["_png_path"]:
+        log("     (the .png, not the .r16 — it carries its own resolution)")
     log("  3. Section Size   : {0}x{0} quads".format(lay["sectionQuads"]))
     log("     Sections/Comp  : {0}x{0}".format(lay["sectionsPerComponent"]))
     log("     Component Count: {}x{}".format(lay["componentsX"], lay["componentsY"]))
