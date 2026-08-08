@@ -1672,6 +1672,7 @@ CITY_PALETTE = {
     "military":   ((0.288, 0.300, 0.276), 0.84),
     "campus":     ((0.360, 0.350, 0.330), 0.80),
     "park":       ((0.318, 0.330, 0.300), 0.86),
+    "parking":    ((0.088, 0.086, 0.090), 0.72),
 }
 
 
@@ -1990,8 +1991,15 @@ def city_buildings(limit="0"):
             continue                       # the plan says land, the terrain says sea
 
         # A part stacked above its own base — a flight deck, a roof pavilion —
-        # is not sunk into anything; only what stands on the ground is.
-        sink = 0.0 if (base > 0.01 or on_water) else BUILDING_SINK_M
+        # is not sunk into anything; only what stands on the ground is. And the
+        # sink is capped at a quarter of the part's own height, because a fixed
+        # 1.8 m buries anything shorter than that outright: a car park is a
+        # 12 cm pad, and sinking it by the full amount put every acre of asphalt
+        # on the map two metres underground.
+        if base > 0.01 or on_water:
+            sink = 0.0
+        else:
+            sink = min(BUILDING_SINK_M, h * 0.25)
 
         x = x0 + (u * span_uu)
         y = y0 + (row_f * span_uu)
