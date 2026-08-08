@@ -1695,7 +1695,7 @@ def _load_city():
     city["_json_path"] = json_path
     city["_bin_path"] = bin_path if os.path.exists(bin_path) else None
     if city["_bin_path"]:
-        stride = int(city.get("buildingStride", 7))
+        stride = int(city.get("buildingStride", 9))
         expect = int(city.get("buildingCount", 0)) * stride * 4
         actual = os.path.getsize(bin_path)
         if actual != expect:
@@ -1939,7 +1939,7 @@ def city_buildings(limit="0"):
         return False
 
     import array
-    stride = int(city.get("buildingStride", 7))
+    stride = int(city.get("buildingStride", 9))
     count = int(city.get("buildingCount", 0))
     data = array.array("f")
     with open(city["_bin_path"], "rb") as fh:
@@ -1972,22 +1972,35 @@ def city_buildings(limit="0"):
         d = data[o + 4]
         h = data[o + 5]
         kind = kinds[int(data[o + 6])] if kinds else "house"
+        flags = int(data[o + 7]) if stride > 7 else 0
+        base = data[o + 8] if stride > 8 else 0.0
+        on_water = bool(flags & 2)
 
         row_f = v_off + v * band
         col = int(round(u * (res - 1)))
         row = int(round(row_f * (res - 1)))
         ground = _fast_metres(meta, field, col, row)
-        if ground is None or ground < 0.6:
+        if on_water:
+            # The Midway and the carrier alongside North Island are moored.
+            # Their ground is the waterline, and rejecting them for standing
+            # where the heightmap says sea would throw away the two most
+            # recognisable objects on the bay.
+            ground = 0.0
+        elif ground is None or ground < 0.6:
             continue                       # the plan says land, the terrain says sea
+
+        # A part stacked above its own base — a flight deck, a roof pavilion —
+        # is not sunk into anything; only what stands on the ground is.
+        sink = 0.0 if (base > 0.01 or on_water) else BUILDING_SINK_M
 
         x = x0 + (u * span_uu)
         y = y0 + (row_f * span_uu)
-        z = (ground - BUILDING_SINK_M + h / 2.0) * 100.0
+        z = (ground + base - sink + h / 2.0) * 100.0
 
         t = unreal.Transform(
             unreal.Vector(x, y, z),
             unreal.Rotator(0.0, 0.0, rot),
-            unreal.Vector(w, d, h + BUILDING_SINK_M))
+            unreal.Vector(w, d, h + sink))
         buckets.setdefault(kind, []).append(t)
 
     placed = 0
