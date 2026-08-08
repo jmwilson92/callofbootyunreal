@@ -32,6 +32,7 @@ puts the whole city 60 m under the sea.
     look <place>        point the viewport at one of them
     overview            camera 12 km up, looking straight down
     water               lay a sea surface at Z=0 across the map
+    sample [n]          trace the level and print it beside the file
     templates           list the level templates this engine ships
 """
 
@@ -904,6 +905,114 @@ def overview():
     return True
 
 
+def _shade(h):
+    """One character per elevation band, so a map fits in the log."""
+    if h is None:
+        return " "
+    if h < -1:
+        return "~"
+    if h < 8:
+        return "."
+    if h < 30:
+        return ":"
+    if h < 60:
+        return "+"
+    if h < 95:
+        return "#"
+    return "@"
+
+
+def sample(n="40"):
+    """Trace the landscape in the level and print it beside the source file.
+
+    This exists because four screenshots in a row have been ambiguous. A view
+    from 12 km up through a partially-streamed World Partition grid cannot
+    distinguish "the heightmap is tiled" from "four cells are loaded and the
+    rest are not" — and those need opposite fixes. A ray fired straight down
+    hits whatever collision is actually there, so it answers the question the
+    viewport keeps dodging.
+
+    Left map is the level. Right map is sandiego.r16. If they differ, the level
+    holds different data than the file, and the import is what is wrong. If
+    they match, the terrain is right and it is the view that is misleading.
+    """
+    meta = load_meta()
+    if not meta:
+        return False
+    try:
+        n = max(16, min(72, int(n)))
+    except (TypeError, ValueError):
+        n = 40
+
+    span = (meta["resolution"] - 1) * meta["unrealLandscapeScale"]["x"]
+    x0 = y0 = -span / 2.0
+    groups = [g for g in _landscape_groups()
+              if abs(g["res"] - meta["resolution"]) <= max(2, meta["resolution"] * 0.02)]
+    if groups:
+        x0, y0 = groups[0]["minCorner"]
+    else:
+        warn("no landscape found — tracing over the origin anyway")
+
+    try:
+        world = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_editor_world()
+    except Exception as exc:                                     # noqa: BLE001
+        warn("no editor world ({})".format(exc))
+        return False
+
+    def trace(x, y):
+        start = unreal.Vector(x, y, 60000.0)
+        end = unreal.Vector(x, y, -30000.0)
+        try:
+            res = unreal.SystemLibrary.line_trace_single(
+                world, start, end,
+                unreal.TraceTypeQuery.TRACE_TYPE_QUERY1, True, [],
+                unreal.DrawDebugTrace.NONE, True)
+        except Exception:                                        # noqa: BLE001
+            return None
+        hit = res[1] if isinstance(res, tuple) else res
+        if not hit:
+            return None
+        try:
+            if hasattr(hit, "b_blocking_hit") and not hit.b_blocking_hit:
+                return None
+            loc = hit.location if hasattr(hit, "location") else hit.get_editor_property("location")
+        except Exception:                                        # noqa: BLE001
+            return None
+        return loc.z / 100.0                                     # cm -> m
+
+    res = meta["resolution"]
+    step = span / (n - 1)
+    misses = 0
+    log("=" * 64)
+    log("LEVEL (traced)              FILE (sandiego.r16)")
+    log("~ sea   . 0-8   : 8-30   + 30-60   # 60-95   @ 95+   ' ' nothing hit")
+    for r in range(n):
+        left = []
+        right = []
+        for c in range(n):
+            h = trace(x0 + c * step, y0 + r * step)
+            if h is None:
+                misses += 1
+            left.append(_shade(h))
+            # Same point out of the file. The landscape's +Y is the image's
+            # row axis, so this indexes the file exactly as the import did.
+            col = int(round((c / (n - 1.0)) * (res - 1)))
+            row = int(round((r / (n - 1.0)) * (res - 1)))
+            right.append(_shade(_sample_metres(meta, col, row)))
+        log("{}   {}".format("".join(left), "".join(right)))
+    log("=" * 64)
+    if misses:
+        log("{} of {} rays hit nothing — unloaded World Partition cells look "
+            "like blank space here, and like missing terrain in the "
+            "viewport.".format(misses, n * n))
+        log("Window -> World Partition, select all, right-click -> Load Region,")
+        log("then run this again before concluding the data is wrong.")
+    log("If the two maps disagree, the level has different data than the file:")
+    log("clear-landscape and re-import. If they agree, the terrain is correct")
+    log("and the viewport was showing partially loaded cells.")
+    return True
+
+
 COMMANDS = {
     "report": report,
     "recipe": import_recipe,
@@ -915,6 +1024,7 @@ COMMANDS = {
     "look": look,
     "overview": overview,
     "water": water,
+    "sample": sample,
     "templates": list_templates,
 }
 
