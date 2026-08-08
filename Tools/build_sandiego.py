@@ -654,10 +654,6 @@ def place_landscape(delete_others="yes"):
     sx, sy, sz = tr["scale"]
     lx, ly, lz = tr["location"]
 
-    # Snapshot enough to redo this by hand if the parent does not propagate.
-    old_scale = g["scale"].x
-    old_lo_x, old_lo_y = g["minCorner"]
-    before = [(a, a.get_actor_location()) for a in g["members"]]
     witness = next((a for a in g["members"] if _is_proxy(a)), None)
     witness_x = witness.get_actor_location().x if witness else None
 
@@ -666,15 +662,23 @@ def place_landscape(delete_others="yes"):
     target.set_actor_location(unreal.Vector(lx, ly, lz), False, False)
 
     if witness is not None and abs(witness.get_actor_location().x - witness_x) < 1.0:
-        log("parent transform did not reach the proxies — moving all {} "
-            "directly".format(len(g["members"])))
-        factor = (sx / old_scale) if old_scale else 1.0
-        for a, loc in before:
-            a.set_actor_scale3d(unreal.Vector(sx, sy, sz))
-            a.set_actor_location(unreal.Vector(
-                lx + (loc.x - old_lo_x) * factor,
-                ly + (loc.y - old_lo_y) * factor,
-                lz), False, False)
+        # The parent did not carry its proxies, and moving them here is not the
+        # answer. A LandscapeStreamingProxy is not a free-standing actor: its
+        # transform is bound to the landscape's section layout, so setting all
+        # 257 by hand spaces them correctly while their geometry stays at the
+        # old scale — islands of terrain on a grid four times too coarse, with
+        # flat gaps between. It looks like the same tile stamped over and over,
+        # which is exactly what it is.
+        warn("the parent transform did not reach the {} streaming proxies."
+             .format(len(g["members"]) - 1))
+        warn("Do NOT let anything move them individually — that breaks the")
+        warn("section layout and tiles the terrain. Re-import instead, with the")
+        warn("scale and location typed into the New Landscape panel:")
+        warn("  Scale    X {}  Y {}  Z {}".format(sx, sy, sz))
+        warn("  Location X {:.0f}  Y {:.0f}  Z {:.0f}".format(lx, ly, lz))
+        warn("Run 'clear-landscape', then import with those in the dialog. A")
+        warn("landscape built at the right transform never needs moving.")
+        return False
 
     log("placed {} (~{} x {}, {} actors): scale ({}, {}, {}) at "
         "({:.0f}, {:.0f}, {:.0f})".format(
