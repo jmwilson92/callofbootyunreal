@@ -256,6 +256,23 @@ def look(place="downtown"):
     p = uv_to_world(meta, u, v)
     h = _sample_metres(meta, p["col"], p["row"]) or 0.0
 
+    # uv_to_world assumes the map is centred on the origin, which is where the
+    # transform puts it — but only if the import went in at the right location.
+    # Read the landscape's real corner and work from that instead, so this aims
+    # at the right place even when the level does not match the intent.
+    groups = [g for g in _landscape_groups()
+              if abs(g["res"] - meta["resolution"]) <= max(2, meta["resolution"] * 0.02)]
+    if groups:
+        span = (meta["resolution"] - 1) * meta["unrealLandscapeScale"]["x"]
+        cx, cy = groups[0]["minCorner"]
+        shift_x = cx - (-span / 2.0)
+        shift_y = cy - (-span / 2.0)
+        if abs(shift_x) > 1000 or abs(shift_y) > 1000:
+            warn("landscape corner is ({:.0f}, {:.0f}), not ({:.0f}, {:.0f}) — "
+                 "aiming at where it actually is".format(cx, cy, -span / 2, -span / 2))
+        p["x"] += shift_x
+        p["y"] += shift_y
+
     # Stand off to the south and look north, high enough to take in the coast.
     dist = 250000.0
     eye = unreal.Vector(p["x"], p["y"] + dist, h * 100.0 + 150000.0)
@@ -380,8 +397,13 @@ def import_recipe():
     log("     (resolution should read {} x {})".format(
         meta["resolution"], meta["resolution"]))
     log("  4. Scale          : X {}  Y {}  Z {}".format(sx, sy, sz))
-    log("  5. Location       : X {:.0f}  Y {:.0f}  Z {:.0f}".format(lx, ly, lz))
-    log("     (or just run place_landscape() after the import — safer)")
+    log("  5. Location       : X 0  Y 0  Z {:.0f}".format(lz))
+    log("     The dialog CENTRES the landscape on this point, so 0,0 is what")
+    log("     spans {:.0f}..{:.0f}. Entering the corner ({:.0f}) puts the whole".format(
+        lx, -lx, lx))
+    log("     map one full width to the south-west instead.")
+    log("     The finished actor's own Location reads {:.0f}, {:.0f} — that one".format(lx, ly))
+    log("     is the corner. Two different conventions, one field name.")
     log("")
     log("  Z scale {} reproduces {}..{} m: one unit of Z scale spans 512 m of "
         "the 16-bit range, so scale = range_m * 100 / 512.".format(
@@ -675,7 +697,7 @@ def place_landscape(delete_others="yes"):
         warn("section layout and tiles the terrain. Re-import instead, with the")
         warn("scale and location typed into the New Landscape panel:")
         warn("  Scale    X {}  Y {}  Z {}".format(sx, sy, sz))
-        warn("  Location X {:.0f}  Y {:.0f}  Z {:.0f}".format(lx, ly, lz))
+        warn("  Location X 0  Y 0  Z {:.0f}  (the dialog centres on this)".format(lz))
         warn("Run 'clear-landscape', then import with those in the dialog. A")
         warn("landscape built at the right transform never needs moving.")
         return False
