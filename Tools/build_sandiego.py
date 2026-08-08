@@ -2,30 +2,31 @@
 Build the San Diego level from data, inside the Unreal editor.
 
 HOW TO RUN IT
-    Output Log (Window -> Output Log). The command box at the bottom has a
-    small dropdown on its left that says "Cmd". Either:
+    Output Log (Window -> Output Log). In the command box at the bottom, with
+    the dropdown left of it on "Cmd", type:
 
-      a) leave it on Cmd and type:
-             py "C:/Users/laugh/projects/callofbootyunreal/callofbooty/Tools/build_sandiego.py"
+        py "C:/Users/laugh/projects/callofbootyunreal/callofbooty/Tools/build_sandiego.py"
 
-      b) or switch the dropdown to Python and paste:
-             exec(open(r'C:\\Users\\laugh\\projects\\callofbootyunreal\\callofbooty\\Tools\\build_sandiego.py').read())
+    That runs report() — a read-only survey. The other entry points take
+    arguments, so run them from the same box in Python mode, or append a call
+    to the bottom of this file and re-run it.
 
-    (a) is the safer one — it does not care what the dropdown is set to. In Cmd
-    mode the exec() line is treated as a legacy console command and rejected as
-    deprecated, which is exactly what happened the first time.
+WHAT IS SCRIPTED AND WHAT IS NOT
+The geography is traced data (callofbooty repo, src/world/geo/SanDiegoGeo.js)
+and the whole point of tracing it was that it can be rebuilt at any scale, any
+number of times, without redoing it by hand.
 
-WHY A SCRIPT
-The geography is traced data (see the callofbooty repo,
-src/world/geo/SanDiegoGeo.js), and the whole point of tracing it was that it can
-be rebuilt at any scale, any number of times, without redoing it by hand.
-Anything that has to survive a re-import belongs here rather than in someone's
-memory of which buttons they pressed.
+The one step that cannot be scripted is the heightmap import itself. Unreal has
+never exposed ALandscape::Import to Python — confirmed on this build, where the
+landscape editor types are absent from the `unreal` module. So the import is a
+dialog, and this script's job is to hand you the exact numbers for it and then
+fix up the transform afterwards, because the transform is where a typo silently
+puts the whole city 60 m under the sea.
 
-Stage 1 only, for now: report the environment and check the heightmap is where
-it should be. Landscape import follows once the engine version is confirmed —
-the landscape API moved between 5.3, 5.4 and 5.5, and guessing produces scripts
-that fail halfway through and leave a half-built level behind.
+    report()            what engine, what level, what landscape, is it right
+    make_open_world()   create the World Partition map to import into
+    place_landscape()   apply the correct scale + origin to the imported terrain
+    import_recipe()     print the numbers to type into the import dialog
 """
 
 import json
@@ -36,6 +37,10 @@ import unreal
 
 HEIGHTMAP_DIR = os.path.join(unreal.Paths.project_dir(), "Tools", "Heightmaps")
 
+# Where the open world map lives. Content-relative, as Unreal package paths.
+MAP_PACKAGE = "/Game/Maps/Lvl_SanDiego"
+OPEN_WORLD_TEMPLATE = "/Engine/Maps/Templates/OpenWorld"
+
 
 def log(msg):
     unreal.log("[sandiego] {}".format(msg))
@@ -45,116 +50,262 @@ def warn(msg):
     unreal.log_warning("[sandiego] {}".format(msg))
 
 
-def editor_world():
-    """The open level, across engine versions.
-
-    EditorLevelLibrary was deprecated in 5.0 in favour of subsystems, but it
-    still works; the subsystem does not exist on older builds. Try the modern
-    one first and fall back, so this reports rather than throws.
-    """
-    try:
-        sub = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem)
-        if sub:
-            return sub.get_editor_world()
-    except Exception:                                            # noqa: BLE001
-        pass
-    try:
-        return unreal.EditorLevelLibrary.get_editor_world()
-    except Exception as exc:                                     # noqa: BLE001
-        warn("could not get the editor world ({})".format(exc))
-        return None
-
-
-def report_environment():
-    """Everything a later stage needs to branch on, printed once."""
-    log("engine version : {}".format(unreal.SystemLibrary.get_engine_version()))
-    log("project dir    : {}".format(unreal.Paths.project_dir()))
-
-    world = editor_world()
-    log("current level  : {}".format(world.get_name() if world else "<none>"))
-
-    # World Partition is what makes a 17.6 km map viable at all, so its state
-    # decides whether we add a new open world map or convert an existing one.
-    wp = None
-    if world:
-        try:
-            wp = world.get_world_partition()
-        except Exception as exc:                                 # noqa: BLE001
-            warn("world partition: could not query ({})".format(exc))
-    log("world partition: {}".format("ENABLED" if wp else "not enabled"))
-
-    # Which landscape entry points exist tells stage 2 which import path to
-    # write, without another round trip.
-    have = []
-    for name in (
-        "LandscapeEditorSubsystem",
-        "LandscapeProxy",
-        "AlphaBrush",
-        "LandscapeImportLayerInfo",
-        "EditorAssetLibrary",
-        "LevelEditorSubsystem",
-        "EditorActorSubsystem",
-    ):
-        if hasattr(unreal, name):
-            have.append(name)
-    log("landscape api  : {}".format(", ".join(have) if have else "<none found>"))
-
-
-def check_heightmap():
-    """Confirm the traced geography arrived intact and report its import scale."""
+def load_meta():
+    """The exporter's sidecar, or None with a reason logged."""
     meta_path = os.path.join(HEIGHTMAP_DIR, "sandiego.json")
     raw_path = os.path.join(HEIGHTMAP_DIR, "sandiego.r16")
-
     if not os.path.exists(meta_path) or not os.path.exists(raw_path):
         warn("MISSING heightmap. Expected: {}".format(raw_path))
-        warn("Git LFS may not have fetched it — run: git lfs pull")
         return None
-
     with open(meta_path, "r") as handle:
         meta = json.load(handle)
-
     res = meta["resolution"]
-    expected_bytes = res * res * 2                # 16-bit
-    actual_bytes = os.path.getsize(raw_path)
-
-    log("heightmap      : {} x {}".format(res, res))
-    log("  path         : {}".format(raw_path))
-    log("  frame        : {} x {} m".format(
-        meta["frameMetres"]["width"], meta["frameMetres"]["height"]))
-    log("  heights      : {}..{} m".format(
-        meta["observedMetres"]["min"], meta["observedMetres"]["max"]))
-    log("  land cover   : {:.1f}%".format(meta["landCoverage"] * 100))
-
-    if actual_bytes != expected_bytes:
-        # An LFS pointer file is ~130 bytes, so this catches the most likely
-        # failure by far: the asset was never fetched.
-        warn("  BAD SIZE     : {} bytes, expected {}".format(
-            actual_bytes, expected_bytes))
-        if actual_bytes < 1000:
-            warn("  This looks like a Git LFS pointer. Run: git lfs pull")
+    actual = os.path.getsize(raw_path)
+    expected = res * res * 2
+    if actual != expected:
+        warn("heightmap is {} bytes, expected {} — re-export or re-pull".format(
+            actual, expected))
         return None
-    log("  size         : {} bytes (matches {} x {} x 2)".format(
-        actual_bytes, res, res))
-
-    scale = meta["unrealLandscapeScale"]
-    log("  import scale : X {}  Y {}  Z {}".format(
-        scale["x"], scale["y"], scale["z"]))
-    log("  (Z reproduces the {}..{} m range: Unreal maps full 16-bit onto "
-        "512 uu at Z=100, so scale = range_cm / 512)".format(
-            meta["heightRangeMetres"]["min"], meta["heightRangeMetres"]["max"]))
+    meta["_raw_path"] = os.path.abspath(raw_path)
     return meta
 
 
-def main():
-    log("=" * 60)
-    report_environment()
-    log("-" * 60)
-    meta = check_heightmap()
-    log("=" * 60)
-    if meta:
-        log("Ready. Paste this output back and the landscape import follows.")
-    else:
+# ---------------------------------------------------------------- geometry --
+
+def component_layout(res):
+    """Split (res - 1) quads into the section/component grid Unreal wants.
+
+    Landscape is not free to be any size: it is components, each of 1x1 or 2x2
+    sections, each section a square of 7/15/31/63/127 quads. Getting this wrong
+    is what makes the import dialog silently resample and blur the coastline.
+    Prefer the layout with the fewest components, which streams best.
+    """
+    quads = res - 1
+    best = None
+    for section_quads in (127, 63, 31, 15, 7):
+        for sections in (2, 1):
+            per_component = section_quads * sections
+            if quads % per_component:
+                continue
+            n = quads // per_component
+            total = n * n
+            if best is None or total < best["components"]:
+                best = {
+                    "sectionQuads": section_quads,
+                    "sectionsPerComponent": sections,
+                    "componentsX": n,
+                    "componentsY": n,
+                    "components": total,
+                    "quadsPerComponent": per_component,
+                }
+    return best
+
+
+def transform_for(meta):
+    """Scale and origin that put the traced world where it belongs.
+
+    Two facts drive all of this:
+
+      - Unreal stores landscape height as a 16-bit value about a midpoint of
+        32768, and one unit of Z scale spans 512 m of that range. So the scale
+        that reproduces an N-metre range is (N * 100) / 512 cm.
+      - Landscape-local Z=0 is that midpoint, not sea level. Our range is not
+        centred on zero, so the actor has to be lifted to put the waterline at
+        world Z=0 — otherwise every coastline in the map is 60 m underwater and
+        it looks, convincingly and wrongly, like the export was bad.
+    """
+    res = meta["resolution"]
+    lo = meta["heightRangeMetres"]["min"]
+    hi = meta["heightRangeMetres"]["max"]
+    scale = meta["unrealLandscapeScale"]
+
+    # Elevation that lands on the 16-bit midpoint, i.e. on landscape-local Z=0.
+    mid_metres = lo + (32768.0 / 65535.0) * (hi - lo)
+    z_offset_uu = mid_metres * 100.0
+
+    span_uu = (res - 1) * scale["x"]
+    return {
+        "scale": (scale["x"], scale["y"], scale["z"]),
+        # Centre the map on the world origin, sea level at Z=0
+        "location": (-span_uu / 2.0, -span_uu / 2.0, z_offset_uu),
+        "spanUU": span_uu,
+        "spanKM": span_uu / 100000.0,
+        "seaLevelMidMetres": mid_metres,
+    }
+
+
+# ------------------------------------------------------------------ report --
+
+def _find_landscapes():
+    try:
+        sub = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+        actors = sub.get_all_level_actors()
+    except Exception as exc:                                     # noqa: BLE001
+        warn("could not list actors ({})".format(exc))
+        return []
+    return [a for a in actors if isinstance(a, unreal.LandscapeProxy)]
+
+
+def _partitioned():
+    """Is the open level World Partition? Probe several bindings, not one.
+
+    The first version of this asked World.get_world_partition() and reported
+    "not enabled" when the attribute was missing — which says nothing about the
+    level and everything about the Python bindings.
+    """
+    for name in ("WorldPartitionSubsystem", "WorldPartitionBlueprintLibrary"):
+        if hasattr(unreal, name):
+            return "likely (bindings present — check World Settings)"
+    try:
+        sub = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+        for a in sub.get_all_level_actors():
+            if type(a).__name__ in ("WorldPartitionMiniMapVolume", "WorldDataLayers"):
+                return "ENABLED"
+    except Exception:                                            # noqa: BLE001
+        pass
+    return "no evidence in this level"
+
+
+def report():
+    """Read-only survey: engine, level, landscape, heightmap. Changes nothing."""
+    log("=" * 64)
+    log("engine version : {}".format(unreal.SystemLibrary.get_engine_version()))
+    log("project dir    : {}".format(unreal.Paths.project_dir()))
+
+    try:
+        world = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_editor_world()
+    except Exception:                                            # noqa: BLE001
+        world = None
+    log("current level  : {}".format(world.get_name() if world else "<none>"))
+    log("world partition: {}".format(_partitioned()))
+
+    lands = _find_landscapes()
+    log("landscapes     : {}".format(len(lands)))
+    for a in lands:
+        loc = a.get_actor_location()
+        sc = a.get_actor_scale3d()
+        log("  {} @ ({:.0f}, {:.0f}, {:.0f})  scale ({:.3f}, {:.3f}, {:.3f})".format(
+            a.get_actor_label(), loc.x, loc.y, loc.z, sc.x, sc.y, sc.z))
+
+    log("-" * 64)
+    meta = load_meta()
+    if not meta:
         log("Fix the heightmap above before continuing.")
+        log("=" * 64)
+        return None
+
+    res = meta["resolution"]
+    lay = component_layout(res)
+    tr = transform_for(meta)
+    log("heightmap      : {} x {}  ({:.1f} MB)".format(
+        res, res, os.path.getsize(meta["_raw_path"]) / 1048576.0))
+    log("  frame        : {} x {} m".format(
+        meta["frameMetres"]["width"], meta["frameMetres"]["height"]))
+    log("  heights      : {}..{} m observed, {}..{} m encoded".format(
+        meta["observedMetres"]["min"], meta["observedMetres"]["max"],
+        meta["heightRangeMetres"]["min"], meta["heightRangeMetres"]["max"]))
+    log("  land cover   : {:.1f}%".format(meta["landCoverage"] * 100))
+    log("  in engine    : {:.2f} km square, {:.2f} m per quad".format(
+        tr["spanKM"], tr["scale"][0] / 100.0))
+    if lay:
+        log("  components   : {} ({}x{} of {} quads)".format(
+            lay["components"], lay["componentsX"], lay["componentsY"],
+            lay["quadsPerComponent"]))
+    else:
+        warn("  {} does not factor into a legal landscape size — re-export at "
+             "1009, 2017, 4033 or 8129".format(res))
+    log("=" * 64)
+    return meta
 
 
-main()
+# ------------------------------------------------------------------ recipe --
+
+def import_recipe():
+    """Print exactly what to type into Landscape -> New -> Import from File."""
+    meta = load_meta()
+    if not meta:
+        return
+    lay = component_layout(meta["resolution"])
+    tr = transform_for(meta)
+    sx, sy, sz = tr["scale"]
+    lx, ly, lz = tr["location"]
+
+    log("=" * 64)
+    log("LANDSCAPE IMPORT — type these, do not let the dialog guess")
+    log("  1. Landscape mode (Ctrl+Shift+2) -> Manage -> New -> Import from File")
+    log("  2. Heightmap File : {}".format(meta["_raw_path"]))
+    log("  3. Section Size   : {0}x{0} quads".format(lay["sectionQuads"]))
+    log("     Sections/Comp  : {0}x{0}".format(lay["sectionsPerComponent"]))
+    log("     Component Count: {}x{}".format(lay["componentsX"], lay["componentsY"]))
+    log("     (resolution should read {} x {})".format(
+        meta["resolution"], meta["resolution"]))
+    log("  4. Scale          : X {}  Y {}  Z {}".format(sx, sy, sz))
+    log("  5. Location       : X {:.0f}  Y {:.0f}  Z {:.0f}".format(lx, ly, lz))
+    log("     (or just run place_landscape() after the import — safer)")
+    log("")
+    log("  Z scale {} reproduces {}..{} m: one unit of Z scale spans 512 m of "
+        "the 16-bit range, so scale = range_m * 100 / 512.".format(
+            sz, meta["heightRangeMetres"]["min"], meta["heightRangeMetres"]["max"]))
+    log("  Z location {:.0f} exists because landscape-local Z=0 sits at the "
+        "16-bit midpoint, which is {:.1f} m of real elevation — not sea "
+        "level.".format(lz, tr["seaLevelMidMetres"]))
+    log("=" * 64)
+
+
+# ------------------------------------------------------------------ actions --
+
+def make_open_world(map_package=MAP_PACKAGE):
+    """Create the World Partition map to import the landscape into.
+
+    Lvl_FirstPerson is a template level and not partitioned; a 17.6 km landscape
+    in a non-partitioned level loads all 1024 components at once, which is how
+    you get an editor that will not open the map you just made.
+    """
+    sub = unreal.get_editor_subsystem(unreal.LevelEditorSubsystem)
+    if unreal.EditorAssetLibrary.does_asset_exist(map_package):
+        warn("{} already exists — opening it instead of overwriting".format(map_package))
+        sub.load_level(map_package)
+        return map_package
+    log("creating {} from {}".format(map_package, OPEN_WORLD_TEMPLATE))
+    ok = sub.new_level_from_template(map_package, OPEN_WORLD_TEMPLATE)
+    if not ok:
+        warn("new_level_from_template failed. Do it by hand: File -> New Level "
+             "-> Open World, then save as {}".format(map_package))
+        return None
+    sub.save_current_level()
+    log("created. Delete the template's default Landscape before importing ours.")
+    return map_package
+
+
+def place_landscape():
+    """Apply the computed scale and origin to the landscape in the open level.
+
+    Run this after the import. It is the whole reason the import numbers do not
+    have to be typed perfectly: get the resolution and file right in the dialog,
+    and this fixes the rest.
+    """
+    meta = load_meta()
+    if not meta:
+        return False
+    lands = _find_landscapes()
+    if not lands:
+        warn("no Landscape in this level — import it first, then re-run")
+        return False
+    if len(lands) > 1:
+        warn("{} landscapes here; placing the first ({}). Delete the "
+             "template's default one.".format(len(lands), lands[0].get_actor_label()))
+
+    tr = transform_for(meta)
+    a = lands[0]
+    sx, sy, sz = tr["scale"]
+    lx, ly, lz = tr["location"]
+    a.set_actor_scale3d(unreal.Vector(sx, sy, sz))
+    a.set_actor_location(unreal.Vector(lx, ly, lz), False, False)
+    log("placed {}: scale ({}, {}, {}) at ({:.0f}, {:.0f}, {:.0f})".format(
+        a.get_actor_label(), sx, sy, sz, lx, ly, lz))
+    log("  {:.2f} km square, sea level at Z=0, centred on the origin".format(
+        tr["spanKM"]))
+    return True
+
+
+report()
