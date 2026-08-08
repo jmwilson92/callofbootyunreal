@@ -7,9 +7,8 @@ HOW TO RUN IT
 
         py "C:/Users/laugh/projects/callofbootyunreal/callofbooty/Tools/build_sandiego.py"
 
-    That runs report() — a read-only survey. The other entry points take
-    arguments, so run them from the same box in Python mode, or append a call
-    to the bottom of this file and re-run it.
+    That runs report — a read-only survey. Every other entry point is a
+    trailing argument on the same line, e.g. `... build_sandiego.py look zoo`.
 
 WHAT IS SCRIPTED AND WHAT IS NOT
 The geography is traced data (callofbooty repo, src/world/geo/SanDiegoGeo.js)
@@ -25,9 +24,12 @@ puts the whole city 60 m under the sea.
 
     report              what engine, what level, what landscape, is it right
     open-world          create the World Partition map to import into
-    clear-landscape     delete the template's default terrain, proxies included
+    identify            list each landscape with the resolution it really is
+    clear-landscape     delete every landscape here, proxies included
     recipe              print the numbers to type into the import dialog
-    place               apply the correct scale + origin to the imported terrain
+    place               transform our import, delete any impostor beside it
+    probe               read elevations at 21 landmarks straight from the file
+    look <place>        point the viewport at one of them
     templates           list the level templates this engine ships
 """
 
@@ -150,6 +152,123 @@ def transform_for(meta):
         "spanKM": span_uu / 100000.0,
         "seaLevelMidMetres": mid_metres,
     }
+
+
+# ------------------------------------------------------------------ places --
+
+# Traced landmarks, in the same normalised (u, v) the geography is authored in:
+# u east, v south, both 0..1 over the reference frame. Kept in step with
+# src/world/geo/SanDiegoGeo.js in the callofbooty repo.
+PLACES = [
+    ("missionbeach", 0.070, 0.026), ("oceanbeach", 0.099, 0.213),
+    ("sunsetcliffs", 0.101, 0.426), ("pointloma", 0.140, 0.620),
+    ("cabrillo", 0.150, 0.870), ("airport", 0.370, 0.337),
+    ("oldtown", 0.508, 0.136), ("missionvalley", 0.658, 0.048),
+    ("hillcrest", 0.589, 0.227), ("balboa", 0.710, 0.354),
+    ("downtown", 0.611, 0.500), ("littleitaly", 0.569, 0.436),
+    ("northisland", 0.349, 0.644), ("coronado", 0.497, 0.772),
+    ("nationalcity", 0.972, 0.820), ("northpark", 0.802, 0.245),
+    ("cityheights", 0.968, 0.294), ("kearnymesa", 0.520, 0.040),
+    ("clairemont", 0.300, 0.130), ("mcrd", 0.395, 0.285),
+    ("zoo", 0.700, 0.310),
+]
+
+
+def uv_to_world(meta, u, v):
+    """Normalised (u, v) -> world centimetres, and the heightmap sample it hits.
+
+    The frame is wider than it is tall and the heightmap is square, so the
+    export letterboxed: v is sampled over the frame's real aspect and the
+    remainder left at sea. Undo exactly that here, or every landmark lands about
+    a kilometre north of where it belongs.
+    """
+    res = meta["resolution"]
+    fm = meta["frameMetres"]
+    band = float(fm["height"]) / float(fm["width"])     # image fraction the frame fills
+    v_off = (1.0 - band) / 2.0
+    row_f = v_off + v * band                            # 0..1 down the image
+
+    span_uu = (res - 1) * meta["unrealLandscapeScale"]["x"]
+    return {
+        "x": (u - 0.5) * span_uu,
+        "y": (row_f - 0.5) * span_uu,
+        "col": int(round(u * (res - 1))),
+        "row": int(round(row_f * (res - 1))),
+    }
+
+
+def _sample_metres(meta, col, row):
+    """Read one height straight out of the .r16. No image library needed."""
+    res = meta["resolution"]
+    if not (0 <= col < res and 0 <= row < res):
+        return None
+    lo = meta["heightRangeMetres"]["min"]
+    hi = meta["heightRangeMetres"]["max"]
+    with open(meta["_raw_path"], "rb") as fh:
+        fh.seek((row * res + col) * 2)
+        b = fh.read(2)
+    if len(b) != 2:
+        return None
+    raw = b[0] | (b[1] << 8)                            # little-endian
+    return lo + (raw / 65535.0) * (hi - lo)
+
+
+def probe():
+    """Print the elevation the heightmap holds at every named landmark.
+
+    This is the check worth doing before dressing anything: terrain can look
+    entirely convincing and still be the wrong terrain. Downtown and the airport
+    should read near sea level, Point Loma and the mesas well above it, and the
+    bay below zero. If those disagree, the import is wrong in a way no amount of
+    flying around will reveal.
+    """
+    meta = load_meta()
+    if not meta:
+        return
+    log("=" * 64)
+    log("{:<14} {:>10} {:>12} {:>12}".format("place", "height m", "world X", "world Y"))
+    for name, u, v in PLACES:
+        p = uv_to_world(meta, u, v)
+        h = _sample_metres(meta, p["col"], p["row"])
+        log("{:<14} {:>10} {:>12.0f} {:>12.0f}".format(
+            name, "n/a" if h is None else "{:.1f}".format(h), p["x"], p["y"]))
+    log("=" * 64)
+    log("Sanity: downtown/airport/coronado near 0, pointloma and the mesas high,")
+    log("open water negative. Anything wildly off means a bad import, not a bad trace.")
+
+
+def look(place="downtown"):
+    """Point the editor viewport at a landmark.
+
+    Flying 17.6 km by hand to find out whether the coastline is right is how you
+    end up not checking.
+    """
+    meta = load_meta()
+    if not meta:
+        return
+    key = str(place).strip().lower()
+    match = [p for p in PLACES if p[0] == key]
+    if not match:
+        warn("unknown place '{}'. Known: {}".format(
+            key, ", ".join(p[0] for p in PLACES)))
+        return
+    _, u, v = match[0]
+    p = uv_to_world(meta, u, v)
+    h = _sample_metres(meta, p["col"], p["row"]) or 0.0
+
+    # Stand off to the south and look north, high enough to take in the coast.
+    dist = 250000.0
+    eye = unreal.Vector(p["x"], p["y"] + dist, h * 100.0 + 150000.0)
+    rot = unreal.Rotator(0.0, -32.0, -90.0)   # roll, pitch, yaw: -Y is north
+    try:
+        unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem)\
+            .set_level_viewport_camera_info(eye, rot)
+    except Exception as exc:                                     # noqa: BLE001
+        warn("could not move the viewport ({}). Fly to X {:.0f} Y {:.0f} "
+             "by hand.".format(exc, p["x"], p["y"]))
+        return
+    log("looking at {}: world ({:.0f}, {:.0f}), ground {:.1f} m".format(
+        key, p["x"], p["y"], h))
 
 
 # ------------------------------------------------------------------ report --
@@ -378,34 +497,114 @@ def clear_landscape():
     return removed
 
 
-def place_landscape():
-    """Apply the computed scale and origin to the landscape in the open level.
+def _landscape_info(a):
+    """Infer a landscape's heightmap resolution from its bounds and scale.
 
-    Run this after the import. It is the whole reason the import numbers do not
-    have to be typed perfectly: get the resolution and file right in the dialog,
-    and this fixes the rest.
+    Needed because "the landscape in this level" stopped being a safe
+    assumption. The Open World template ships one, the import adds a second
+    called Landscape2, and picking whichever the actor list returned first
+    applied the 17.6 km transform to a 505x505 template default while the real
+    terrain sat untouched. Bounds discriminate them by a factor of eight, and
+    unlike a name they cannot be wrong.
+    """
+    try:
+        origin, extent = a.get_actor_bounds(False)
+    except Exception:                                            # noqa: BLE001
+        try:
+            origin, extent = a.get_actor_bounds(False, False)
+        except Exception as exc:                                 # noqa: BLE001
+            warn("no bounds for {} ({})".format(a.get_actor_label(), exc))
+            return None
+    sc = a.get_actor_scale3d()
+    quads = (extent.x * 2.0) / sc.x if sc.x else 0.0
+    return {
+        "actor": a,
+        "label": a.get_actor_label(),
+        "res": int(round(quads)) + 1,
+        "scale": sc,
+        "location": a.get_actor_location(),
+    }
+
+
+def identify():
+    """List every landscape with the resolution its geometry implies."""
+    meta = load_meta()
+    want = meta["resolution"] if meta else None
+    infos = [i for i in (_landscape_info(a) for a in _find_landscapes()) if i]
+    if not infos:
+        log("no landscape actors loaded. If the Outliner shows one greyed out, "
+            "right-click it -> Load, then re-run.")
+        return []
+    log("=" * 64)
+    for i in infos:
+        tag = ""
+        if want:
+            tag = "  <- ours" if abs(i["res"] - want) <= max(2, want * 0.02) \
+                else "  <- NOT ours (template default?)"
+        log("{:<16} ~{} x {}  scale {:.1f}  at ({:.0f}, {:.0f}, {:.0f}){}".format(
+            i["label"], i["res"], i["res"], i["scale"].x,
+            i["location"].x, i["location"].y, i["location"].z, tag))
+    log("=" * 64)
+    return infos
+
+
+def place_landscape(delete_others="yes"):
+    """Transform the imported landscape, and remove any impostor beside it.
+
+    Picks by resolution rather than by order: the level can hold the template's
+    505x505 default and our 4033 import at the same time, and only one of them
+    should be 17.6 km across.
     """
     meta = load_meta()
     if not meta:
         return False
-    lands = _find_landscapes()
-    if not lands:
-        warn("no Landscape in this level — import it first, then re-run")
+    infos = [i for i in (_landscape_info(a) for a in _find_landscapes()) if i]
+    if not infos:
+        warn("no landscape loaded in this level.")
+        warn("If the Outliner shows one greyed out it is unloaded and invisible "
+             "to Python — right-click it -> Load, then re-run.")
         return False
-    if len(lands) > 1:
-        warn("{} landscapes here; placing the first ({}). Delete the "
-             "template's default one.".format(len(lands), lands[0].get_actor_label()))
+
+    want = meta["resolution"]
+    tol = max(2, want * 0.02)
+    ours = [i for i in infos if abs(i["res"] - want) <= tol]
+    others = [i for i in infos if abs(i["res"] - want) > tol]
+
+    if not ours:
+        warn("none of the {} landscape(s) here look like a {} import:".format(
+            len(infos), want))
+        for i in infos:
+            warn("  {} reads as ~{} x {}".format(i["label"], i["res"], i["res"]))
+        warn("Import the heightmap first, or right-click any unloaded landscape "
+             "in the Outliner -> Load and re-run.")
+        return False
+    if len(ours) > 1:
+        warn("{} landscapes match {} — using {}".format(
+            len(ours), want, ours[0]["label"]))
+
+    if others and str(delete_others).lower() not in ("no", "false", "0"):
+        sub = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+        for i in others:
+            log("deleting {} (~{} x {}, not our import)".format(
+                i["label"], i["res"], i["res"]))
+            try:
+                sub.destroy_actor(i["actor"])
+            except Exception as exc:                             # noqa: BLE001
+                warn("  could not delete it ({})".format(exc))
+    elif others:
+        warn("leaving {} other landscape(s) in place".format(len(others)))
 
     tr = transform_for(meta)
-    a = lands[0]
+    a = ours[0]["actor"]
     sx, sy, sz = tr["scale"]
     lx, ly, lz = tr["location"]
     a.set_actor_scale3d(unreal.Vector(sx, sy, sz))
     a.set_actor_location(unreal.Vector(lx, ly, lz), False, False)
-    log("placed {}: scale ({}, {}, {}) at ({:.0f}, {:.0f}, {:.0f})".format(
-        a.get_actor_label(), sx, sy, sz, lx, ly, lz))
+    log("placed {} (~{} x {}): scale ({}, {}, {}) at ({:.0f}, {:.0f}, {:.0f})".format(
+        ours[0]["label"], ours[0]["res"], ours[0]["res"], sx, sy, sz, lx, ly, lz))
     log("  {:.2f} km square, sea level at Z=0, centred on the origin".format(
         tr["spanKM"]))
+    log("  Save with Ctrl+S, then: ... build_sandiego.py look downtown")
     return True
 
 
@@ -415,6 +614,9 @@ COMMANDS = {
     "open-world": make_open_world,
     "clear-landscape": clear_landscape,
     "place": place_landscape,
+    "identify": identify,
+    "probe": probe,
+    "look": look,
     "templates": list_templates,
 }
 
@@ -434,7 +636,7 @@ def _dispatch():
     if not fn:
         warn("unknown command '{}'. Try: {}".format(name, ", ".join(COMMANDS)))
         return
-    fn()
+    fn(*argv[1:])
 
 
 _dispatch()
