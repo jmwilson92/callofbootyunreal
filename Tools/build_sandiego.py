@@ -1404,37 +1404,57 @@ ROAD_TAG = "SanDiegoFreeway"
 
 # The real corridors, traced from the reference map, in the same normalised
 # (u, v) as everything else. Widths are metres.
+# The real corridors, re-traced off a Google Maps capture and registered onto
+# this frame with three landmarks: Cabrillo, downtown and National City. That
+# registration checks out — National City lands on u 0.972, which is where the
+# PLACES data independently puts it.
+#
+# (id, width_m, is_bridge, points). Widths are metres.
 FREEWAYS = [
-    ("i5", 26, [
-        (0.340, 0.000), (0.360, 0.060), (0.400, 0.140), (0.450, 0.230),
-        (0.505, 0.300), (0.545, 0.360), (0.575, 0.420), (0.605, 0.470),
-        (0.650, 0.530), (0.720, 0.600), (0.790, 0.660), (0.860, 0.720),
-        (0.930, 0.780)]),
-    ("i8", 24, [
-        (0.240, 0.140), (0.330, 0.108), (0.450, 0.078), (0.580, 0.056),
-        (0.720, 0.040), (0.860, 0.028), (1.000, 0.020)]),
-    ("i15", 22, [
-        (0.880, 0.000), (0.885, 0.100), (0.890, 0.200), (0.888, 0.300),
-        (0.878, 0.400), (0.860, 0.470), (0.830, 0.530)]),
-    ("i805", 22, [
-        (0.800, 0.000), (0.820, 0.090), (0.845, 0.180), (0.868, 0.270),
-        (0.885, 0.360), (0.900, 0.460), (0.915, 0.560), (0.930, 0.660),
-        (0.945, 0.770)]),
-    ("sr163", 18, [
-        (0.700, 0.045), (0.680, 0.130), (0.664, 0.215), (0.648, 0.300),
-        (0.628, 0.400)]),
-    ("sr94", 18, [
-        (0.660, 0.500), (0.730, 0.510), (0.800, 0.525), (0.880, 0.540),
-        (0.960, 0.555)]),
-    # SR-75, the Coronado bridge: downtown across the bay to the island. It is
-    # the one stretch that must not follow the ground, because the ground under
-    # it is the bay.
-    ("sr75", 16, [
-        (0.640, 0.545), (0.600, 0.590), (0.560, 0.640), (0.520, 0.690),
-        (0.492, 0.735)]),
+    # I-5: down from Old Town past the airport, along the east side of
+    # downtown, then south-east to National City.
+    ("i5", 26, False, [
+        (0.445, 0.000), (0.454, 0.082), (0.465, 0.217), (0.485, 0.298),
+        (0.513, 0.365), (0.547, 0.419), (0.582, 0.473), (0.616, 0.514),
+        (0.661, 0.567), (0.713, 0.615), (0.764, 0.655), (0.821, 0.702),
+        (0.878, 0.742), (0.935, 0.783), (0.992, 0.850)]),
+    # I-8 through Mission Valley, running east from Ocean Beach along the
+    # river. It starts further west than the old trace had it.
+    ("i8", 24, False, [
+        (0.149, 0.153), (0.206, 0.153), (0.297, 0.136), (0.388, 0.116),
+        (0.490, 0.103), (0.582, 0.089), (0.690, 0.069), (0.809, 0.055),
+        (0.923, 0.042), (1.000, 0.035)]),
+    # I-805, parallel to I-5 but inland. It leaves the eastern edge of the
+    # frame around National City's latitude, which is where it really goes.
+    ("i805", 22, False, [
+        (0.809, 0.000), (0.832, 0.082), (0.855, 0.177), (0.889, 0.285),
+        (0.923, 0.378), (0.958, 0.460), (0.986, 0.541), (1.000, 0.585)]),
+    # SR-163 south out of Mission Valley, through Balboa Park to downtown.
+    ("sr163", 18, False, [
+        (0.650, 0.095), (0.659, 0.163), (0.665, 0.210), (0.670, 0.284),
+        (0.670, 0.365), (0.661, 0.433), (0.644, 0.487), (0.627, 0.514)]),
+    # SR-94 east out of downtown. The old trace had it running south-east;
+    # it actually climbs slightly north of east toward Lemon Grove.
+    ("sr94", 18, False, [
+        (0.650, 0.554), (0.718, 0.548), (0.809, 0.527), (0.901, 0.507),
+        (0.992, 0.498), (1.000, 0.497)]),
+    # The Coronado bridge, and then SR-75 continuing down the Silver Strand.
+    # Split in two because only the first half is a bridge — the old version
+    # held the whole route at 62 m, including the part on dry sand.
+    ("sr75_bridge", 16, True, [
+        (0.678, 0.597), (0.650, 0.618), (0.616, 0.641), (0.582, 0.664),
+        (0.547, 0.682), (0.519, 0.696)]),
+    ("sr75_strand", 16, False, [
+        (0.519, 0.696), (0.536, 0.783), (0.570, 0.864), (0.593, 0.945),
+        (0.616, 1.000)]),
+    # I-15 is deliberately absent: it runs east of this frame's edge, and a
+    # stub drawn along the boundary would be a line, not a freeway.
 ]
 
 SEGMENT_METRES = 160.0
+# Steepest grade a route may climb. Interstates top out near 6%; this is a
+# little over that, which reads as a road without needing real earthworks.
+MAX_GRADE = 0.08
 
 
 def _road_material():
@@ -1527,14 +1547,12 @@ def roads():
     step_uv = SEGMENT_METRES / frame_w
     placed = 0
 
-    for name, width_m, pts in FREEWAYS:
+    for name, width_m, bridge, pts in FREEWAYS:
         walk = _resample(pts, step_uv)
-        # The Coronado bridge spans open water; holding it level is the whole
-        # point of a bridge, and following the seabed would put it underwater.
-        bridge = name == "sr75"
-        deck = None
-        if bridge:
-            deck = 62.0                     # metres above sea level
+        # A bridge holds its deck; everything else follows the ground. The
+        # flag is per-route because SR-75 is both: a bridge over the channel,
+        # then an ordinary road down the Silver Strand.
+        deck = 62.0 if bridge else None     # metres above sea level
 
         world = []
         for u, v in walk:
@@ -1559,6 +1577,25 @@ def roads():
                     z = (world[k - 1][2] + world[k][2] * 2.0 + world[k + 1][2]) / 4.0
                     smoothed[k] = (world[k][0], world[k][1], z)
                 world = smoothed
+
+            # Averaging alone still leaves 40% where a route crosses a mesa
+            # escarpment: smoothing spreads a cliff out, it does not flatten
+            # one. Walk the profile in both directions and cap each step, which
+            # bounds the grade outright instead of hoping.
+            for pass_dir in (1, -1):
+                order = range(1, len(world)) if pass_dir > 0 \
+                    else range(len(world) - 2, -1, -1)
+                prev = 0 if pass_dir > 0 else len(world) - 1
+                for k in order:
+                    px, py, pz = world[prev]
+                    cx, cy, cz = world[k]
+                    run = math.hypot(cx - px, cy - py)
+                    limit = run * MAX_GRADE
+                    if cz - pz > limit:
+                        world[k] = (cx, cy, pz + limit)
+                    elif pz - cz > limit:
+                        world[k] = (cx, cy, pz - limit)
+                    prev = k
 
         for i in range(len(world) - 1):
             ax, ay, az = world[i]
