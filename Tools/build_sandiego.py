@@ -32,7 +32,9 @@ puts the whole city 60 m under the sea.
     look <place>        point the viewport at one of them
     overview            camera 12 km up, looking straight down
     water               lay a sea surface at Z=0 across the map
-    sample [n]          trace the level and print it beside the file
+    sample              compare the level against the file, per tile
+    load                load every World Partition actor first
+    wp-api              list the World Partition bindings this build has
     templates           list the level templates this engine ships
 """
 
@@ -1013,6 +1015,84 @@ def sample(unused=None):
     return True
 
 
+def load_all():
+    """Load every World Partition actor, so the level in memory is the level.
+
+    This is the missing step behind most of a day's confusion. Unreal streams a
+    partitioned level in the editor too, and `get_all_level_actors` returns only
+    what is loaded — so a landscape that imported perfectly reports as absent,
+    reads back with stale bounds, and renders as a few tiles floating in space.
+    Every one of those looks exactly like a broken import.
+
+    The APIs for this move between versions, so try them in turn and say which
+    one worked rather than assuming.
+    """
+    loaded = False
+
+    # 1. The subsystem, if this build exposes a loading call on it.
+    try:
+        sub = unreal.get_editor_subsystem(unreal.WorldPartitionSubsystem)
+        for name in ("load_all_cells", "load_all_actors", "load_all"):
+            fn = getattr(sub, name, None)
+            if callable(fn):
+                fn()
+                log("loaded via WorldPartitionSubsystem.{}()".format(name))
+                loaded = True
+                break
+    except Exception:                                            # noqa: BLE001
+        pass
+
+    # 2. The blueprint library, which is where the actor-descriptor calls live.
+    if not loaded:
+        lib = getattr(unreal, "WorldPartitionBlueprintLibrary", None)
+        if lib is not None:
+            try:
+                descs = None
+                for name in ("get_intersecting_actor_descs", "get_all_actor_descs"):
+                    fn = getattr(lib, name, None)
+                    if callable(fn):
+                        descs = fn() if name == "get_all_actor_descs" else None
+                        break
+                if descs:
+                    lib.load_actors(descs)
+                    log("loaded {} actors via WorldPartitionBlueprintLibrary"
+                        .format(len(descs)))
+                    loaded = True
+            except Exception as exc:                             # noqa: BLE001
+                warn("WorldPartitionBlueprintLibrary did not take it ({})".format(exc))
+
+    n = len(_find_landscapes())
+    log("landscape actors visible to Python: {}".format(n))
+    if not loaded:
+        warn("could not load regions from script on this build. Do it in the UI:")
+        warn("  Window -> World Partition -> World Partition Editor")
+        warn("  drag a box over the whole minimap, right-click -> Load Region")
+        warn("Then re-run this. Until the actors are loaded, every other command")
+        warn("here is reading a fraction of the level and reporting it as fact.")
+    elif n == 0:
+        warn("still nothing — the level may genuinely have no landscape.")
+    return loaded
+
+
+def wp_api():
+    """List what this build exposes for World Partition, for when load fails."""
+    names = sorted(n for n in dir(unreal) if "WorldPartition" in n)
+    if not names:
+        log("no WorldPartition symbols in this build's Python bindings")
+        return names
+    for n in names:
+        obj = getattr(unreal, n, None)
+        calls = []
+        try:
+            calls = [m for m in dir(obj)
+                     if ("load" in m.lower() or "cell" in m.lower())
+                     and not m.startswith("_")][:8]
+        except Exception:                                        # noqa: BLE001
+            pass
+        log("  {}{}".format(n, ("  -> " + ", ".join(calls)) if calls else ""))
+    return names
+
+
 COMMANDS = {
     "report": report,
     "recipe": import_recipe,
@@ -1025,6 +1105,8 @@ COMMANDS = {
     "overview": overview,
     "water": water,
     "sample": sample,
+    "load": load_all,
+    "wp-api": wp_api,
     "templates": list_templates,
 }
 
