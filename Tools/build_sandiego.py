@@ -32,6 +32,7 @@ puts the whole city 60 m under the sea.
     look <place>        point the viewport at one of them
     overview            camera 12 km up, looking straight down
     water               lay a sea surface at Z=0 across the map
+    material            colour the terrain by height and slope
     sample              compare the level against the file, per tile
     load                load every World Partition actor first
     wp-api              list the World Partition bindings this build has
@@ -1175,6 +1176,180 @@ def wp_api():
     return names
 
 
+LAND_MATERIAL = "/Game/Materials/M_SanDiego_Land"
+
+
+def _expr(mat, class_name, x, y, **props):
+    """Create a material node by class name, or None with a reason."""
+    cls = getattr(unreal, class_name, None)
+    if cls is None:
+        warn("this build has no unreal.{}".format(class_name))
+        return None
+    node = unreal.MaterialEditingLibrary.create_material_expression(mat, cls, x, y)
+    for k, v in props.items():
+        try:
+            node.set_editor_property(k, v)
+        except Exception as exc:                                 # noqa: BLE001
+            warn("  {}.{} did not take ({})".format(class_name, k, exc))
+    return node
+
+
+def _wire(a, a_out, b, b_in):
+    try:
+        unreal.MaterialEditingLibrary.connect_material_expressions(a, a_out, b, b_in)
+        return True
+    except Exception as exc:                                     # noqa: BLE001
+        warn("could not connect {} -> {} ({})".format(a_out or "out", b_in, exc))
+        return False
+
+
+def _land_material():
+    """Build the landscape material: colour from height and slope.
+
+    No painted layers. Weightmaps would mean hand-painting 17.6 km of coastline,
+    and the heightfield already knows where the beaches and the mesa tops are —
+    height and surface normal reproduce San Diego's banding well enough that
+    painting would only be refining it.
+
+    Everything is a named parameter, so the colours can be pushed around in the
+    material editor without coming back here.
+    """
+    if unreal.EditorAssetLibrary.does_asset_exist(LAND_MATERIAL):
+        return unreal.EditorAssetLibrary.load_asset(LAND_MATERIAL)
+
+    tools = unreal.AssetToolsHelpers.get_asset_tools()
+    folder, name = LAND_MATERIAL.rsplit("/", 1)
+    mat = tools.create_asset(name, folder, unreal.Material, unreal.MaterialFactoryNew())
+    if not mat:
+        warn("could not create {}".format(LAND_MATERIAL))
+        return None
+
+    # --- height, in metres above sea level -------------------------------
+    wp = _expr(mat, "MaterialExpressionWorldPosition", -1500, -200)
+    z = _expr(mat, "MaterialExpressionComponentMask", -1300, -200,
+              r=False, g=False, b=True, a=False)
+    metres = _expr(mat, "MaterialExpressionDivide", -1150, -200, const_b=100.0)
+    if not (wp and z and metres):
+        return mat
+    _wire(wp, "", z, "Input")
+    _wire(z, "", metres, "A")
+
+    # Beach -> scrub over the first few metres of dry land.
+    beach_h = _expr(mat, "MaterialExpressionScalarParameter", -1150, -80,
+                    parameter_name="BeachTopMetres", default_value=11.0)
+    t_beach = _expr(mat, "MaterialExpressionDivide", -950, -200)
+    c_beach = _expr(mat, "MaterialExpressionClamp", -800, -200)
+    _wire(metres, "", t_beach, "A")
+    _wire(beach_h, "", t_beach, "B")
+    _wire(t_beach, "", c_beach, "Input")
+
+    # Scrub -> mesa top. Offset first so the transition starts off the coast.
+    mesa_lo = _expr(mat, "MaterialExpressionScalarParameter", -1150, 60,
+                    parameter_name="MesaStartMetres", default_value=45.0)
+    mesa_sp = _expr(mat, "MaterialExpressionScalarParameter", -1150, 140,
+                    parameter_name="MesaSpanMetres", default_value=55.0)
+    off = _expr(mat, "MaterialExpressionSubtract", -950, 20)
+    t_mesa = _expr(mat, "MaterialExpressionDivide", -800, 20)
+    c_mesa = _expr(mat, "MaterialExpressionClamp", -650, 20)
+    _wire(metres, "", off, "A")
+    _wire(mesa_lo, "", off, "B")
+    _wire(off, "", t_mesa, "A")
+    _wire(mesa_sp, "", t_mesa, "B")
+    _wire(t_mesa, "", c_mesa, "Input")
+
+    # --- slope, 0 flat to 1 vertical -------------------------------------
+    nrm = _expr(mat, "MaterialExpressionVertexNormalWS", -1500, 300)
+    nz = _expr(mat, "MaterialExpressionComponentMask", -1300, 300,
+               r=False, g=False, b=True, a=False)
+    inv = _expr(mat, "MaterialExpressionSubtract", -1150, 300, const_a=1.0)
+    gain = _expr(mat, "MaterialExpressionScalarParameter", -1150, 400,
+                 parameter_name="SlopeGain", default_value=3.2)
+    steep = _expr(mat, "MaterialExpressionMultiply", -950, 300)
+    c_slope = _expr(mat, "MaterialExpressionClamp", -800, 300)
+    if nrm and nz and inv and steep and c_slope:
+        _wire(nrm, "", nz, "Input")
+        _wire(nz, "", inv, "B")
+        _wire(inv, "", steep, "A")
+        _wire(gain, "", steep, "B")
+        _wire(steep, "", c_slope, "Input")
+
+    # --- the palette ------------------------------------------------------
+    def colour(label, pos_y, rgb):
+        node = _expr(mat, "MaterialExpressionVectorParameter", -650, pos_y,
+                     parameter_name=label)
+        if node:
+            node.set_editor_property(
+                "default_value", unreal.LinearColor(rgb[0], rgb[1], rgb[2], 1.0))
+        return node
+
+    # Southern California, not Ireland: the scrub is olive-grey and burnt off
+    # for most of the year, and the mesa tops are drier still.
+    sand = colour("Sand", -420, (0.470, 0.412, 0.290))
+    scrub = colour("Scrub", -300, (0.166, 0.180, 0.104))
+    mesa = colour("MesaTop", -180, (0.250, 0.230, 0.148))
+    rock = colour("Rock", -60, (0.196, 0.174, 0.150))
+
+    mix1 = _expr(mat, "MaterialExpressionLinearInterpolate", -420, 120)
+    mix2 = _expr(mat, "MaterialExpressionLinearInterpolate", -260, 120)
+    mix3 = _expr(mat, "MaterialExpressionLinearInterpolate", -100, 120)
+    if not (sand and scrub and mesa and rock and mix1 and mix2 and mix3):
+        warn("palette incomplete — the material will be partly unwired")
+        return mat
+    _wire(sand, "", mix1, "A")
+    _wire(scrub, "", mix1, "B")
+    _wire(c_beach, "", mix1, "Alpha")
+
+    _wire(mix1, "", mix2, "A")
+    _wire(mesa, "", mix2, "B")
+    _wire(c_mesa, "", mix2, "Alpha")
+
+    _wire(mix2, "", mix3, "A")
+    _wire(rock, "", mix3, "B")
+    if c_slope:
+        _wire(c_slope, "", mix3, "Alpha")
+
+    unreal.MaterialEditingLibrary.connect_material_property(
+        mix3, "", unreal.MaterialProperty.MP_BASE_COLOR)
+
+    rough = _expr(mat, "MaterialExpressionScalarParameter", -260, 300,
+                  parameter_name="Roughness", default_value=0.88)
+    if rough:
+        unreal.MaterialEditingLibrary.connect_material_property(
+            rough, "", unreal.MaterialProperty.MP_ROUGHNESS)
+
+    unreal.MaterialEditingLibrary.recompile_material(mat)
+    unreal.EditorAssetLibrary.save_asset(LAND_MATERIAL)
+    log("built {}".format(LAND_MATERIAL))
+    return mat
+
+
+def material():
+    """Build the landscape material and put it on the terrain."""
+    mat = _land_material()
+    if not mat:
+        return False
+
+    targets = _find_landscapes()
+    if not targets:
+        warn("no landscape in this level to assign it to")
+        return False
+
+    done = 0
+    for a in targets:
+        try:
+            a.set_editor_property("landscape_material", mat)
+            done += 1
+        except Exception as exc:                                 # noqa: BLE001
+            warn("could not assign to {} ({})".format(a.get_actor_label(), exc))
+    log("assigned to {} of {} landscape actor(s)".format(done, len(targets)))
+    log("Sand below {} m, scrub above it, mesa tops from ~{} m, rock on the "
+        "steep faces.".format(11, 45))
+    log("Every colour and threshold is a named parameter — open "
+        "{} to push them around.".format(LAND_MATERIAL))
+    log("Save with Ctrl+S. Shaders will compile for a minute first.")
+    return True
+
+
 COMMANDS = {
     "report": report,
     "recipe": import_recipe,
@@ -1186,6 +1361,7 @@ COMMANDS = {
     "look": look,
     "overview": overview,
     "water": water,
+    "material": material,
     "sample": sample,
     "load": load_all,
     "wp-api": wp_api,
