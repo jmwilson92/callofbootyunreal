@@ -23,10 +23,12 @@ dialog, and this script's job is to hand you the exact numbers for it and then
 fix up the transform afterwards, because the transform is where a typo silently
 puts the whole city 60 m under the sea.
 
-    report()            what engine, what level, what landscape, is it right
-    make_open_world()   create the World Partition map to import into
-    place_landscape()   apply the correct scale + origin to the imported terrain
-    import_recipe()     print the numbers to type into the import dialog
+    report              what engine, what level, what landscape, is it right
+    open-world          create the World Partition map to import into
+    clear-landscape     delete the template's default terrain, proxies included
+    recipe              print the numbers to type into the import dialog
+    place               apply the correct scale + origin to the imported terrain
+    templates           list the level templates this engine ships
 """
 
 import json
@@ -254,27 +256,107 @@ def import_recipe():
 
 # ------------------------------------------------------------------ actions --
 
+def list_templates():
+    """Print the level templates this engine actually ships.
+
+    Hardcoding a template path is how you get a script that works on one
+    engine version. 5.8 may name these differently to 5.3; ask it.
+    """
+    found = []
+    for folder in ("/Engine/Maps/Templates", "/Engine/Maps"):
+        try:
+            for path in unreal.EditorAssetLibrary.list_assets(folder, recursive=True):
+                if "template" in path.lower() or "openworld" in path.lower():
+                    found.append(path.split(".")[0])
+        except Exception:                                        # noqa: BLE001
+            continue
+    for p in sorted(set(found)):
+        log("  template: {}".format(p))
+    if not found:
+        warn("no templates listed — use File -> New Level by hand")
+    return sorted(set(found))
+
+
 def make_open_world(map_package=MAP_PACKAGE):
     """Create the World Partition map to import the landscape into.
 
     Lvl_FirstPerson is a template level and not partitioned; a 17.6 km landscape
     in a non-partitioned level loads all 1024 components at once, which is how
     you get an editor that will not open the map you just made.
+
+    Prefers an *empty* open world. The plain Open World template ships with a
+    default Landscape, and deleting one in a partitioned level is fiddlier than
+    it sounds — the terrain is split across streaming proxies and the Outliner
+    only lists the ones currently loaded, so a manual select-and-delete tends to
+    leave pieces behind. Starting empty means there is nothing to delete.
     """
     sub = unreal.get_editor_subsystem(unreal.LevelEditorSubsystem)
     if unreal.EditorAssetLibrary.does_asset_exist(map_package):
         warn("{} already exists — opening it instead of overwriting".format(map_package))
         sub.load_level(map_package)
         return map_package
-    log("creating {} from {}".format(map_package, OPEN_WORLD_TEMPLATE))
-    ok = sub.new_level_from_template(map_package, OPEN_WORLD_TEMPLATE)
-    if not ok:
-        warn("new_level_from_template failed. Do it by hand: File -> New Level "
-             "-> Open World, then save as {}".format(map_package))
-        return None
-    sub.save_current_level()
-    log("created. Delete the template's default Landscape before importing ours.")
-    return map_package
+
+    candidates = [
+        "/Engine/Maps/Templates/OpenWorld_Empty",
+        "/Engine/Maps/Templates/Template_OpenWorld_Empty",
+        "/Engine/Maps/Templates/OpenWorld",
+    ]
+    for template in candidates:
+        if not unreal.EditorAssetLibrary.does_asset_exist(template):
+            continue
+        log("creating {} from {}".format(map_package, template))
+        if sub.new_level_from_template(map_package, template):
+            sub.save_current_level()
+            n = len(_find_landscapes())
+            if n:
+                log("created, with {} landscape actor(s) from the template — "
+                    "run the 'clear-landscape' command next.".format(n))
+            else:
+                log("created, no landscape present. Import ours straight in.")
+            return map_package
+        warn("{} did not take, trying the next one".format(template))
+
+    warn("no usable template. Do it by hand: File -> New Level -> Empty Open "
+         "World, then save as {}".format(map_package))
+    list_templates()
+    return None
+
+
+def clear_landscape():
+    """Delete every landscape actor in the open level, proxies included.
+
+    This exists because doing it by hand is genuinely awkward. A World Partition
+    landscape is one Landscape actor plus a LandscapeStreamingProxy per region,
+    and the Outliner only shows actors that are currently loaded — so selecting
+    what you can see and pressing Delete leaves the unloaded proxies in place,
+    and the leftovers only turn up later as terrain fighting the imported map.
+    """
+    lands = _find_landscapes()
+    if not lands:
+        log("no landscape actors loaded in this level — nothing to delete.")
+        log("If you can see terrain anyway, its proxies are unloaded: open "
+            "Window -> World Partition, select all in the minimap, right-click "
+            "-> Load Region, then run this again.")
+        return 0
+
+    sub = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+    labels = [a.get_actor_label() for a in lands]
+    removed = 0
+    for a in lands:
+        try:
+            sub.destroy_actor(a)
+            removed += 1
+        except Exception as exc:                                 # noqa: BLE001
+            warn("could not delete {} ({})".format(a.get_actor_label(), exc))
+    log("deleted {} of {} landscape actor(s): {}".format(
+        removed, len(lands), ", ".join(labels[:6]) + ("..." if len(labels) > 6 else "")))
+    left = len(_find_landscapes())
+    if left:
+        warn("{} still loaded — re-run, or they are unloaded proxies (see "
+             "World Partition note above)".format(left))
+    else:
+        log("level is clear. Save it (Ctrl+S), then import the heightmap.")
+    return removed
 
 
 def place_landscape():
@@ -312,7 +394,9 @@ COMMANDS = {
     "report": report,
     "recipe": import_recipe,
     "open-world": make_open_world,
+    "clear-landscape": clear_landscape,
     "place": place_landscape,
+    "templates": list_templates,
 }
 
 
