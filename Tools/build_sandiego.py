@@ -1194,13 +1194,43 @@ def _expr(mat, class_name, x, y, **props):
     return node
 
 
+_WIRE_FAILURES = []
+
+
 def _wire(a, a_out, b, b_in):
+    """Connect two nodes, and notice when it does not happen.
+
+    connect_material_expressions returns False for an unknown pin name rather
+    than raising, and the first version ignored that. Three Clamp nodes went
+    unconnected, the material failed to compile, every landscape fell back to
+    the default grey — and the script reported success. Silent failures have
+    cost more today than loud ones.
+    """
+    ok = False
     try:
-        unreal.MaterialEditingLibrary.connect_material_expressions(a, a_out, b, b_in)
-        return True
+        ok = bool(unreal.MaterialEditingLibrary.connect_material_expressions(
+            a, a_out, b, b_in))
     except Exception as exc:                                     # noqa: BLE001
-        warn("could not connect {} -> {} ({})".format(a_out or "out", b_in, exc))
-        return False
+        warn("connect {} -> {} raised ({})".format(a_out or "out", b_in, exc))
+    if not ok:
+        _WIRE_FAILURES.append("{} -> {}".format(a_out or "out", b_in))
+    return ok
+
+
+def _saturate(mat, src, x, y):
+    """Clamp a scalar to 0..1, built from Min and Max.
+
+    Not MaterialExpressionClamp: its first pin is not called "Input" on this
+    build, and a mis-named pin connects to nothing without complaining. Min and
+    Max take A and B, which the rest of this graph already proves work.
+    """
+    hi = _expr(mat, "MaterialExpressionMax", x, y, const_b=0.0)
+    lo = _expr(mat, "MaterialExpressionMin", x + 130, y, const_b=1.0)
+    if not (hi and lo):
+        return None
+    _wire(src, "", hi, "A")
+    _wire(hi, "", lo, "A")
+    return lo
 
 
 def _land_material():
@@ -1214,9 +1244,16 @@ def _land_material():
     Everything is a named parameter, so the colours can be pushed around in the
     material editor without coming back here.
     """
+    # Always rebuild. A material that failed to compile is still an asset, and
+    # reusing it silently reinstates the bug it was rebuilt to fix.
     if unreal.EditorAssetLibrary.does_asset_exist(LAND_MATERIAL):
-        return unreal.EditorAssetLibrary.load_asset(LAND_MATERIAL)
+        log("replacing the existing {}".format(LAND_MATERIAL))
+        try:
+            unreal.EditorAssetLibrary.delete_asset(LAND_MATERIAL)
+        except Exception as exc:                                 # noqa: BLE001
+            warn("could not delete it ({}) — rewiring in place".format(exc))
 
+    del _WIRE_FAILURES[:]
     tools = unreal.AssetToolsHelpers.get_asset_tools()
     folder, name = LAND_MATERIAL.rsplit("/", 1)
     mat = tools.create_asset(name, folder, unreal.Material, unreal.MaterialFactoryNew())
@@ -1238,10 +1275,9 @@ def _land_material():
     beach_h = _expr(mat, "MaterialExpressionScalarParameter", -1150, -80,
                     parameter_name="BeachTopMetres", default_value=11.0)
     t_beach = _expr(mat, "MaterialExpressionDivide", -950, -200)
-    c_beach = _expr(mat, "MaterialExpressionClamp", -800, -200)
     _wire(metres, "", t_beach, "A")
     _wire(beach_h, "", t_beach, "B")
-    _wire(t_beach, "", c_beach, "Input")
+    c_beach = _saturate(mat, t_beach, -810, -200)
 
     # Scrub -> mesa top. Offset first so the transition starts off the coast.
     mesa_lo = _expr(mat, "MaterialExpressionScalarParameter", -1150, 60,
@@ -1250,12 +1286,11 @@ def _land_material():
                     parameter_name="MesaSpanMetres", default_value=55.0)
     off = _expr(mat, "MaterialExpressionSubtract", -950, 20)
     t_mesa = _expr(mat, "MaterialExpressionDivide", -800, 20)
-    c_mesa = _expr(mat, "MaterialExpressionClamp", -650, 20)
     _wire(metres, "", off, "A")
     _wire(mesa_lo, "", off, "B")
     _wire(off, "", t_mesa, "A")
     _wire(mesa_sp, "", t_mesa, "B")
-    _wire(t_mesa, "", c_mesa, "Input")
+    c_mesa = _saturate(mat, t_mesa, -660, 20)
 
     # --- slope, 0 flat to 1 vertical -------------------------------------
     nrm = _expr(mat, "MaterialExpressionVertexNormalWS", -1500, 300)
@@ -1265,13 +1300,13 @@ def _land_material():
     gain = _expr(mat, "MaterialExpressionScalarParameter", -1150, 400,
                  parameter_name="SlopeGain", default_value=3.2)
     steep = _expr(mat, "MaterialExpressionMultiply", -950, 300)
-    c_slope = _expr(mat, "MaterialExpressionClamp", -800, 300)
-    if nrm and nz and inv and steep and c_slope:
+    c_slope = None
+    if nrm and nz and inv and steep:
         _wire(nrm, "", nz, "Input")
         _wire(nz, "", inv, "B")
         _wire(inv, "", steep, "A")
         _wire(gain, "", steep, "B")
-        _wire(steep, "", c_slope, "Input")
+        c_slope = _saturate(mat, steep, -810, 300)
 
     # --- the palette ------------------------------------------------------
     def colour(label, pos_y, rgb):
@@ -1317,9 +1352,16 @@ def _land_material():
         unreal.MaterialEditingLibrary.connect_material_property(
             rough, "", unreal.MaterialProperty.MP_ROUGHNESS)
 
+    if _WIRE_FAILURES:
+        warn("{} connection(s) did not take: {}".format(
+            len(_WIRE_FAILURES), ", ".join(_WIRE_FAILURES)))
+        warn("The material will not compile with unconnected inputs, and the "
+             "landscape would fall back to default grey. Not saving.")
+        return None
+
     unreal.MaterialEditingLibrary.recompile_material(mat)
     unreal.EditorAssetLibrary.save_asset(LAND_MATERIAL)
-    log("built {}".format(LAND_MATERIAL))
+    log("built {}, every connection verified".format(LAND_MATERIAL))
     return mat
 
 
