@@ -1674,6 +1674,25 @@ CITY_PALETTE = {
     "park":       ((0.318, 0.330, 0.300), 0.86),
     "parking":    ((0.088, 0.086, 0.090), 0.72),
     "runway":     ((0.318, 0.316, 0.308), 0.66),
+    "tree":       ((0.118, 0.170, 0.086), 0.92),
+    "tree_trunk": ((0.128, 0.104, 0.078), 0.94),
+    "palm":       ((0.150, 0.196, 0.104), 0.90),
+    "shrub":      ((0.176, 0.190, 0.116), 0.94),
+    "rock":       ((0.310, 0.288, 0.252), 0.88),
+    "water":      ((0.036, 0.114, 0.130), 0.08),
+    # Named commercial uses. Different enough from each other to read as a
+    # strip rather than as one long shed: the filling-station canopy is near
+    # white, the supermarket beige, the cinema almost black.
+    "gas":        ((0.640, 0.628, 0.596), 0.60),
+    "restaurant": ((0.404, 0.296, 0.244), 0.82),
+    "grocery":    ((0.470, 0.436, 0.372), 0.80),
+    "pharmacy":   ((0.520, 0.512, 0.492), 0.78),
+    "strip":      ((0.416, 0.386, 0.336), 0.82),
+    "theatre":    ((0.148, 0.142, 0.152), 0.74),
+    "motel":      ((0.512, 0.468, 0.396), 0.84),
+    "hotel":      ((0.362, 0.372, 0.386), 0.62),
+    "office":     ((0.268, 0.290, 0.316), 0.50),
+    "bank":       ((0.470, 0.458, 0.428), 0.72),
 }
 
 
@@ -1773,6 +1792,29 @@ def _level_origin(meta):
         else:
             warn("no landscape found — placing the city about the world origin")
     return x0, y0, span_uu
+
+
+# The engine's basic shapes, by what the thing actually is. A cube makes a
+# passable building and a very poor tree — a sphere for a crown and a cylinder
+# for a trunk cost the same instance and read correctly from any distance. Swap
+# any of these for real assets and nothing else has to change.
+CITY_MESH = {
+    "tree":       "/Engine/BasicShapes/Sphere",
+    "palm":       "/Engine/BasicShapes/Sphere",
+    "shrub":      "/Engine/BasicShapes/Sphere",
+    "rock":       "/Engine/BasicShapes/Sphere",
+    "tree_trunk": "/Engine/BasicShapes/Cylinder",
+}
+CITY_MESH_DEFAULT = "/Engine/BasicShapes/Cube"
+
+
+def _mesh_for(kind):
+    path = CITY_MESH.get(kind, CITY_MESH_DEFAULT)
+    mesh = unreal.EditorAssetLibrary.load_asset(path)
+    if mesh:
+        return mesh
+    warn("{} is missing — falling back to the cube".format(path))
+    return unreal.EditorAssetLibrary.load_asset(CITY_MESH_DEFAULT)
 
 
 def _city_material(kind):
@@ -1997,7 +2039,10 @@ def city_buildings(limit="0"):
         # 1.8 m buries anything shorter than that outright: a car park is a
         # 12 cm pad, and sinking it by the full amount put every acre of asphalt
         # on the map two metres underground.
-        if base > 0.01 or on_water:
+        if abs(base) > 0.01 or on_water:
+            # Negative bases exist too: a lake surface is placed relative to
+            # the bed under it, and sinking it would drop the water below the
+            # level every other slab in the same lake is holding.
             sink = 0.0
         else:
             sink = min(BUILDING_SINK_M, h * 0.25)
@@ -2016,7 +2061,7 @@ def city_buildings(limit="0"):
     for kind in sorted(buckets):
         transforms = buckets[kind]
         label = "{}_Buildings_{}".format(CITY_TAG, kind)
-        actor, comp = _ism_holder(label, mesh, _city_material(kind))
+        actor, comp = _ism_holder(label, _mesh_for(kind), _city_material(kind))
         if not comp:
             warn("skipped {} ({} buildings)".format(kind, len(transforms)))
             continue
