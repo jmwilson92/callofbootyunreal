@@ -2061,6 +2061,8 @@ CITY_PALETTE = {
     # default grey. US guide blades are green; the posts are galvanised.
     "sign":       ((0.055, 0.235, 0.145), 0.62),
     "sign_post":  ((0.550, 0.560, 0.570), 0.70),
+    "lamp_post":  ((0.470, 0.478, 0.486), 0.62),
+    "lamp":       ((0.780, 0.760, 0.700), 0.40),
     "tree":       ((0.118, 0.170, 0.086), 0.92),
     "tree_trunk": ((0.128, 0.104, 0.078), 0.94),
     "palm":       ((0.150, 0.196, 0.104), 0.90),
@@ -2191,6 +2193,7 @@ CITY_MESH = {
     "shrub":      "/Engine/BasicShapes/Sphere",
     "rock":       "/Engine/BasicShapes/Sphere",
     "tree_trunk": "/Engine/BasicShapes/Cylinder",
+    "lamp_post":  "/Engine/BasicShapes/Cylinder",
 }
 CITY_MESH_DEFAULT = "/Engine/BasicShapes/Cube"
 
@@ -2505,11 +2508,31 @@ def city_buildings(limit="0"):
 
 
 def city_streets():
-    """Lay every surface street and arterial, following the ground."""
+    """Lay streets from the legacy plan arrays, if there are any.
+
+    There are not, in the maps3d plan, and that is the point of this note. Road
+    geometry now arrives through the packed buffer as road_deck, line_white,
+    line_yellow and kerb parts, built by tools/maps3d-roadmesh.mjs with real
+    widths, markings and junction boxes — 1,832 km of it. `city.json` carries
+    `arterials: []` and `streets: []` because nothing writes them any more.
+
+    So this command does nothing on the current plan, and the danger is that it
+    LOOKS like the thing that lays the roads. It says so instead of silently
+    placing zero and returning success.
+    """
     meta = _meta_for_level()
     city = _load_city()
     if not meta or not city:
         return False
+
+    legacy = len(city.get("arterials", [])) + len(city.get("streets", []))
+    if not legacy:
+        log("no streets in the plan's legacy arrays — nothing for this command "
+            "to do.")
+        log("Road geometry comes through the packed buffer now: run "
+            "'city buildings', which places road_deck, line_white, "
+            "line_yellow and kerb along with everything else.")
+        return True
 
     mesh = unreal.EditorAssetLibrary.load_asset("/Engine/BasicShapes/Cube")
     if not mesh:
