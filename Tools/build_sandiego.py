@@ -1674,6 +1674,13 @@ CITY_PALETTE = {
     "park":       ((0.318, 0.330, 0.300), 0.86),
     "parking":    ((0.088, 0.086, 0.090), 0.72),
     "runway":     ((0.318, 0.316, 0.308), 0.66),
+    # The road kit. Asphalt is nearly black; the paint has to be bright enough
+    # to read at speed, which is the whole reason it is that colour in reality.
+    "building":   ((0.402, 0.386, 0.358), 0.86),
+    "road_deck":  ((0.052, 0.051, 0.055), 0.78),
+    "line_white": ((0.880, 0.880, 0.860), 0.55),
+    "line_yellow":((0.880, 0.680, 0.130), 0.55),
+    "kerb":       ((0.560, 0.556, 0.540), 0.80),
     "tree":       ((0.118, 0.170, 0.086), 0.92),
     "tree_trunk": ((0.128, 0.104, 0.078), 0.94),
     "palm":       ((0.150, 0.196, 0.104), 0.90),
