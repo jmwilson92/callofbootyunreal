@@ -1,0 +1,41 @@
+{
+  "producedBy": "tools/maps3d-surfaces.mjs",
+  "source": "/tmp/sd.glb",
+  "resolution": 4096,
+  "metresPerPixel": 4.197,
+  "frameMetres": {
+    "width": 17187.054360739676,
+    "height": 17187.054360739676
+  },
+  "channels": {
+    "R": "road class, 0 = none, larger = more major",
+    "G": "land cover class",
+    "B": "water, 255 = water"
+  },
+  "roadCodes": {
+    "Roads_Arterial": 240,
+    "Roads_Collector": 200,
+    "Roads_Local": 160,
+    "Roads_Bridge": 220,
+    "Roads_Service": 120,
+    "Roads_Parking": 90,
+    "Roads_Paths": 60,
+    "Roads_Sidewalk": 45,
+    "Roads_Crosswalk": 50,
+    "Roads_Rail": 30,
+    "Roads_Tunnel": 0,
+    "Roads_Ferry": 0
+  },
+  "coverCodes": {
+    "LandCover_Wood": 220,
+    "LandCover_Grass": 190,
+    "LandCover_Farmland": 165,
+    "LandCover_Wetland": 140,
+    "LandCover_Sand": 110,
+    "LandCover_Rock": 80,
+    "LandCover_Urban": 50,
+    "LandCover_Ice": 240,
+    "LandCover_Other": 30
+  },
+  "note": "Sample by world position in the landscape material. The frame maps to the landscape exactly: pixel 0 is the minimum corner, pixel RES-1 the maximum, over frameMetres."
+}
