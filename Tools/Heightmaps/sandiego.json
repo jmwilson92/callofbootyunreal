@@ -39,6 +39,7 @@
     "bodies": 27,
     "tidalBodies": 9,
     "surfaceKm2": 61.1,
+    "inlandSurfaceParts": 12018,
     "seaDepthMetres": 9,
     "inlandDepthMetres": 2.2,
     "note": "The capture has no bathymetry. Water bodies are dug from their own surface level; tidal ones are levelled on datum so the ocean actor at Z=0 is the waterline. Run this after maps3d-roadmesh.mjs."
