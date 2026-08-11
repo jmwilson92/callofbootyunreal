@@ -1,27 +1,37 @@
 {
-  "source": "src/world/geo/SanDiegoGeo.js",
+  "source": "/tmp/sd.glb",
+  "producedBy": "tools/maps3d-terrain.mjs",
   "resolution": 4033,
   "width": 4033,
   "height": 4033,
   "bpp": 16,
   "frameMetres": {
-    "width": 17600,
-    "height": 14200
+    "width": 17187.054360739676,
+    "height": 17187.054360739676
   },
+  "playableMetres": {
+    "width": 13187.054360739676,
+    "height": 11799.866083274075
+  },
+  "outOfBoundsRingMetres": 2000,
+  "centre": {
+    "lat": 32.71128,
+    "lon": -117.1933
+  },
+  "mercatorToGround": 0.8414044068298767,
   "heightRangeMetres": {
-    "min": -60,
-    "max": 180
+    "min": -10,
+    "max": 250
   },
   "observedMetres": {
-    "min": -46,
-    "max": 130.2
+    "min": 0,
+    "max": 242.28
   },
-  "landCoverage": 0.532,
   "unrealLandscapeScale": {
-    "x": 436.508,
-    "y": 436.508,
-    "z": 46.875
+    "x": 426.266,
+    "y": 426.266,
+    "z": 50.781
   },
-  "unrealLandscapeZOffsetUU": 6000.2,
-  "note": "Import the .png — it carries its own resolution and bit depth. Set the XYZ scale above and lift the actor by unrealLandscapeZOffsetUU. Z scale reproduces the -60..180 m range: one unit of landscape Z scale spans 512 m of the 16-bit range, so scale = range_m * 100 / 512. Sea level lands at 16383 of 65535."
+  "unrealLandscapeZOffsetUU": 12000.2,
+  "note": "Import sandiego.png. Horizontal axes of the source capture are Web Mercator metres; every figure here is already converted to true ground metres by cos(lat). The playable area is the capture, centred; the ring outside it is generated out-of-bounds terrain."
 }
