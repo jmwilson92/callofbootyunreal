@@ -2057,6 +2057,10 @@ CITY_PALETTE = {
     "line_yellow":((0.880, 0.680, 0.130), 0.55),
     "kerb":       ((0.560, 0.556, 0.540), 0.80),
     "pier":       ((0.520, 0.514, 0.500), 0.86),
+    # Signs had no entry at all, so 2,520 assemblies were coming out in the
+    # default grey. US guide blades are green; the posts are galvanised.
+    "sign":       ((0.055, 0.235, 0.145), 0.62),
+    "sign_post":  ((0.550, 0.560, 0.570), 0.70),
     "tree":       ((0.118, 0.170, 0.086), 0.92),
     "tree_trunk": ((0.128, 0.104, 0.078), 0.94),
     "palm":       ((0.150, 0.196, 0.104), 0.90),
@@ -2388,74 +2392,109 @@ def city_buildings(limit="0"):
     # Group by kind first, then fill one component per kind. Grouping keeps the
     # instance buffers homogeneous, which is the whole point: one draw call per
     # kind instead of one per building.
-    buckets = {}
     n = count if limit <= 0 else min(count, limit)
+
+    # One kind at a time, rather than every transform up front.
+    #
+    # The plan is 657,438 parts now. Building all of their unreal.Transform
+    # objects before placing any of them means the peak is the whole plan
+    # resident at once; doing it a kind at a time makes the peak the largest
+    # single kind, which is 155,000. The cost is one extra scan of a packed
+    # float array per kind, which is nothing next to losing an editor session.
+    present = {}
     for i in range(n):
-        o = i * stride
-        u = data[o]
-        v = data[o + 1]
-        rot = data[o + 2]
-        w = data[o + 3]
-        d = data[o + 4]
-        h = data[o + 5]
-        kind = kinds[int(data[o + 6])] if kinds else "house"
-        flags = int(data[o + 7]) if stride > 7 else 0
-        base = data[o + 8] if stride > 8 else 0.0
-        on_water = bool(flags & 2)
-
-        row_f = v_off + v * band
-        col = int(round(u * (res - 1)))
-        row = int(round(row_f * (res - 1)))
-        ground = _fast_metres(meta, field, col, row)
-        if on_water:
-            # The Midway and the carrier alongside North Island are moored.
-            # Their ground is the waterline, and rejecting them for standing
-            # where the heightmap says sea would throw away the two most
-            # recognisable objects on the bay.
-            ground = 0.0
-        elif ground is None or ground < 0.6:
-            continue                       # the plan says land, the terrain says sea
-
-        # A part stacked above its own base — a flight deck, a roof pavilion —
-        # is not sunk into anything; only what stands on the ground is. And the
-        # sink is capped at a quarter of the part's own height, because a fixed
-        # 1.8 m buries anything shorter than that outright: a car park is a
-        # 12 cm pad, and sinking it by the full amount put every acre of asphalt
-        # on the map two metres underground.
-        if abs(base) > 0.01 or on_water:
-            # Negative bases exist too: a lake surface is placed relative to
-            # the bed under it, and sinking it would drop the water below the
-            # level every other slab in the same lake is holding.
-            sink = 0.0
-        else:
-            sink = min(BUILDING_SINK_M, h * 0.25)
-
-        x = x0 + (u * span_uu)
-        y = y0 + (row_f * span_uu)
-        z = (ground + base - sink + h / 2.0) * 100.0
-
-        t = unreal.Transform(
-            unreal.Vector(x, y, z),
-            unreal.Rotator(0.0, 0.0, rot),
-            unreal.Vector(w, d, h + sink))
-        buckets.setdefault(kind, []).append(t)
+        k = kinds[int(data[i * stride + 6])] if kinds else "house"
+        present[k] = present.get(k, 0) + 1
+    log("{} parts across {} kinds: {}".format(
+        n, len(present),
+        ", ".join("{} {}".format(v, k) for k, v in sorted(present.items()))))
 
     placed = 0
-    for kind in sorted(buckets):
-        transforms = buckets[kind]
-        label = "{}_Buildings_{}".format(CITY_TAG, kind)
-        actor, comp = _ism_holder(label, _mesh_for(kind), _city_material(kind))
+    culled = 0
+    for want_kind in sorted(present):
+        transforms = []
+        for i in range(n):
+            o = i * stride
+            if (kinds[int(data[o + 6])] if kinds else "house") != want_kind:
+                continue
+            u = data[o]
+            v = data[o + 1]
+            rot = data[o + 2]
+            w = data[o + 3]
+            d = data[o + 4]
+            h = data[o + 5]
+            flags = int(data[o + 7]) if stride > 7 else 0
+            base = data[o + 8] if stride > 8 else 0.0
+            on_water = bool(flags & 2)
+            # Flag 4: built over water on purpose. Bridge piers stand on the bed of
+            # a bay that is 9 m below the waterline, and the sea test below would
+            # throw every one of them away — 3,330 parts, most of a bridge — while
+            # reporting a perfectly healthy-looking count.
+            structure = bool(flags & 4)
+
+            row_f = v_off + v * band
+            col = int(round(u * (res - 1)))
+            row = int(round(row_f * (res - 1)))
+            ground = _fast_metres(meta, field, col, row)
+            if on_water:
+                # The Midway and the carrier alongside North Island are moored.
+                # Their ground is the waterline, and rejecting them for standing
+                # where the heightmap says sea would throw away the two most
+                # recognisable objects on the bay.
+                ground = 0.0
+            elif ground is None:
+                continue                       # off the edge of the heightmap
+            elif ground < 0.6 and not structure:
+                continue                       # the plan says land, the terrain says sea
+
+            # A part stacked above its own base — a flight deck, a roof pavilion —
+            # is not sunk into anything; only what stands on the ground is. And the
+            # sink is capped at a quarter of the part's own height, because a fixed
+            # 1.8 m buries anything shorter than that outright: a car park is a
+            # 12 cm pad, and sinking it by the full amount put every acre of asphalt
+            # on the map two metres underground.
+            if abs(base) > 0.01 or on_water or structure:
+                # Negative bases exist too: a lake surface is placed relative to
+                # the bed under it, and sinking it would drop the water below the
+                # level every other slab in the same lake is holding.
+                sink = 0.0
+            else:
+                sink = min(BUILDING_SINK_M, h * 0.25)
+
+            x = x0 + (u * span_uu)
+            y = y0 + (row_f * span_uu)
+            z = (ground + base - sink + h / 2.0) * 100.0
+
+            transforms.append(unreal.Transform(
+                unreal.Vector(x, y, z),
+                unreal.Rotator(0.0, 0.0, rot),
+                unreal.Vector(w, d, h + sink)))
+
+        dropped = present[want_kind] - len(transforms)
+        culled += dropped
+        if not transforms:
+            warn("{}: all {} parts were culled".format(
+                want_kind, present[want_kind]))
+            continue
+        label = "{}_Buildings_{}".format(CITY_TAG, want_kind)
+        actor, comp = _ism_holder(label, _mesh_for(want_kind),
+                                  _city_material(want_kind))
         if not comp:
-            warn("skipped {} ({} buildings)".format(kind, len(transforms)))
+            warn("skipped {} ({} parts)".format(want_kind, len(transforms)))
             continue
         added = _add_instances(comp, transforms)
         placed += added
-        log("  {:<11} {:>7} instances".format(kind, added))
+        log("  {:<11} {:>7} instances{}".format(
+            want_kind, added,
+            "" if not dropped
+            else "  ({} culled below the waterline)".format(dropped)))
         if added != len(transforms):
-            warn("  {} of {} did not take".format(len(transforms) - added,
-                                                  len(transforms)))
+            warn("  {} of {} did not take".format(
+                len(transforms) - added, len(transforms)))
+        del transforms
 
-    log("placed {} buildings of {} in the plan".format(placed, count))
+    log("placed {} parts of {} in the plan, {} culled below the waterline"
+        .format(placed, count, culled))
     if placed == 0:
         warn("nothing was placed. If the subobject route failed above, this")
         warn("engine build cannot attach components from Python — say so rather")
