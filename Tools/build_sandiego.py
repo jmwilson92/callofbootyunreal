@@ -2056,6 +2056,8 @@ CITY_PALETTE = {
     "line_white": ((0.880, 0.880, 0.860), 0.55),
     "line_yellow":((0.880, 0.680, 0.130), 0.55),
     "kerb":       ((0.560, 0.556, 0.540), 0.80),
+    # Decomposed granite, which is what San Diego's park and canyon paths are.
+    "path":       ((0.512, 0.470, 0.398), 0.94),
     "pier":       ((0.520, 0.514, 0.500), 0.86),
     # Signs had no entry at all, so 2,520 assemblies were coming out in the
     # default grey. US guide blades are green; the posts are galvanised.
