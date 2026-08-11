@@ -2417,6 +2417,20 @@ def city_buildings(limit="0"):
         n, len(present),
         ", ".join("{} {}".format(v, k) for k, v in sorted(present.items()))))
 
+    # A kind with no palette entry is not an error, it is grey geometry and a
+    # silent one — CITY_PALETTE.get falls back and says nothing. That is the
+    # same family of bug that has cost this project six defects on the tools
+    # side, so the last place it can still hide gets to complain out loud.
+    no_colour = [k for k in sorted(present) if k not in CITY_PALETTE]
+    if no_colour:
+        warn("no palette entry for {} — {} parts will be the default grey"
+             .format(", ".join(no_colour),
+                     sum(present[k] for k in no_colour)))
+        warn("Add them to CITY_PALETTE rather than letting them import as grey.")
+    default_mesh = [k for k in sorted(present) if k not in CITY_MESH]
+    if default_mesh:
+        log("taking the cube for: {}".format(", ".join(default_mesh)))
+
     placed = 0
     culled = 0
     for want_kind in sorted(present):
