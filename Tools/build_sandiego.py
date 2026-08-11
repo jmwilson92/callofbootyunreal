@@ -2058,6 +2058,9 @@ CITY_PALETTE = {
     "kerb":       ((0.560, 0.556, 0.540), 0.80),
     # Decomposed granite, which is what San Diego's park and canyon paths are.
     "path":       ((0.512, 0.470, 0.398), 0.94),
+    # Footprints the capture gives no height for. Concrete, so they read as a
+    # slab rather than as a building that failed to grow.
+    "pad":        ((0.430, 0.424, 0.412), 0.84),
     "pier":       ((0.520, 0.514, 0.500), 0.86),
     # Signs had no entry at all, so 2,520 assemblies were coming out in the
     # default grey. US guide blades are green; the posts are galvanised.
