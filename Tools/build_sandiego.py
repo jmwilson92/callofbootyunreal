@@ -890,6 +890,144 @@ def water():
     return True
 
 
+BOUNDS_TAG = "SanDiegoOutOfBounds"
+BOUNDS_DAMAGE_PER_SEC = 12.0
+BOUNDS_CEILING_M = 400.0
+BOUNDS_FLOOR_M = -60.0
+
+
+def bounds():
+    """Ring the playable area with volumes that hurt.
+
+    The map is the capture, 13.2 x 11.8 km, sitting in a 17.19 km frame. The
+    2 km of terrain around it is real ground you can walk onto — that was the
+    point, no invisible wall and no cliff at the edge — but staying there has
+    to kill you.
+
+    PainCausingVolume does exactly that with no gameplay code behind it: stand
+    in one and it applies damage on an interval. Four of them, one per side,
+    make a ring rather than a box, so the playable middle is untouched.
+
+    Volumes spawned from Python come with no brush geometry, so the cube has to
+    be built onto each one. That is verified by reading the actor's bounds back:
+    a volume with an unbuilt brush reports a point, has no collision, and is
+    indistinguishable in the Outliner from one that works.
+    """
+    meta = _meta_for_level()
+    if not meta:
+        return False
+    play = meta.get("playableMetres")
+    if not play:
+        warn("this sidecar has no playableMetres — it predates the capture "
+             "import. Re-pull, or re-run tools/maps3d-terrain.mjs.")
+        return False
+
+    span = (meta["resolution"] - 1) * meta["unrealLandscapeScale"]["x"]
+    half = span / 2.0
+    px = float(play["width"]) * 100.0 / 2.0
+    py = float(play["height"]) * 100.0 / 2.0
+    lo = BOUNDS_FLOOR_M * 100.0
+    hi = BOUNDS_CEILING_M * 100.0
+    cz = (lo + hi) / 2.0
+    tall = hi - lo
+
+    # (label, centre x, centre y, size x, size y). The east and west bands run
+    # the full height; the north and south ones fill what is left between them.
+    bands = [
+        ("West", -(half + px) / 2.0, 0.0, half - px, span),
+        ("East", (half + px) / 2.0, 0.0, half - px, span),
+        ("North", 0.0, -(half + py) / 2.0, px * 2.0, half - py),
+        ("South", 0.0, (half + py) / 2.0, px * 2.0, half - py),
+    ]
+
+    sub = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+    removed = 0
+    for a in sub.get_all_level_actors():
+        try:
+            if a.actor_has_tag(BOUNDS_TAG):
+                sub.destroy_actor(a)
+                removed += 1
+        except Exception:                                        # noqa: BLE001
+            continue
+    if removed:
+        log("removed {} existing out-of-bounds volume(s)".format(removed))
+
+    world = None
+    try:
+        world = unreal.get_editor_subsystem(
+            unreal.UnrealEditorSubsystem).get_editor_world()
+    except Exception as exc:                                     # noqa: BLE001
+        warn("could not reach the editor world ({})".format(exc))
+
+    made = 0
+    for label, cx, cy, sx, sy in bands:
+        if sx <= 0 or sy <= 0:
+            warn("{} band has no width — playable area is as big as the frame"
+                 .format(label))
+            continue
+        vol = sub.spawn_actor_from_class(
+            unreal.PainCausingVolume, unreal.Vector(cx, cy, cz),
+            unreal.Rotator(0, 0, 0))
+        if not vol:
+            warn("could not spawn a PainCausingVolume for {}".format(label))
+            continue
+        vol.set_actor_label("{}_{}".format(BOUNDS_TAG, label))
+        try:
+            vol.set_editor_property("tags", [BOUNDS_TAG])
+        except Exception as exc:                                 # noqa: BLE001
+            warn("  tag did not take ({})".format(exc))
+
+        cube = unreal.CubeBuilder()
+        for prop, value in (("x", sx), ("y", sy), ("z", tall)):
+            try:
+                cube.set_editor_property(prop, float(value))
+            except Exception as exc:                             # noqa: BLE001
+                warn("  CubeBuilder.{} did not take ({})".format(prop, exc))
+        try:
+            vol.set_editor_property("brush_builder", cube)
+            cube.build(world, vol)
+        except Exception as exc:                                 # noqa: BLE001
+            warn("  brush build failed for {} ({})".format(label, exc))
+
+        for prop, value in (("pain_causing", True),
+                            ("damage_per_sec", BOUNDS_DAMAGE_PER_SEC),
+                            ("pain_interval", 1.0),
+                            ("entry_pain", False)):
+            try:
+                vol.set_editor_property(prop, value)
+            except Exception as exc:                             # noqa: BLE001
+                warn("  {}.{} did not take ({})".format(label, prop, exc))
+
+        # Read it back. A volume whose brush never built reports a zero extent
+        # and has no collision, and nothing else says so.
+        try:
+            _, extent = vol.get_actor_bounds(False)
+            got = (extent.x * 2, extent.y * 2, extent.z * 2)
+            want = (sx, sy, tall)
+            ok = all(abs(g - w) < max(200.0, w * 0.05)
+                     for g, w in zip(got, want))
+            log("  {:<5} {:.0f} x {:.0f} m at ({:.0f}, {:.0f}) {}".format(
+                label, sx / 100.0, sy / 100.0, cx, cy,
+                "" if ok else "-- BRUSH DID NOT BUILD, extent {:.0f} x {:.0f}"
+                .format(got[0] / 100.0, got[1] / 100.0)))
+            if not ok:
+                warn("  {} has no usable volume. Place a PainCausingVolume by "
+                     "hand from the Place Actors panel and re-run.".format(label))
+        except Exception as exc:                                 # noqa: BLE001
+            warn("  could not measure {} ({})".format(label, exc))
+        made += 1
+
+    log("{} out-of-bounds volume(s) around a {:.2f} x {:.2f} km playable area"
+        .format(made, play["width"] / 1000.0, play["height"] / 1000.0))
+    log("{:.0f} damage a second, from {:.0f} m below sea level to {:.0f} m up, "
+        "so it catches aircraft too.".format(
+            BOUNDS_DAMAGE_PER_SEC, -BOUNDS_FLOOR_M, BOUNDS_CEILING_M))
+    log("The terrain out there is walkable on purpose — the edge of the world "
+        "should be a warning, not a wall.")
+    log("Save with Ctrl+S.")
+    return made > 0
+
+
 def overview():
     """Put the camera high enough to see the whole map at once.
 
@@ -2456,6 +2594,7 @@ COMMANDS = {
     "look": look,
     "overview": overview,
     "water": water,
+    "bounds": bounds,
     "material": material,
     "roads": roads,
     "city": city,
