@@ -24,8 +24,8 @@
     "max": 250
   },
   "observedMetres": {
-    "min": 0,
-    "max": 242.28
+    "min": -9,
+    "max": 232.52
   },
   "unrealLandscapeScale": {
     "x": 426.266,
@@ -33,5 +33,14 @@
     "z": 50.781
   },
   "unrealLandscapeZOffsetUU": 12000.2,
-  "note": "Import sandiego.png. Horizontal axes of the source capture are Web Mercator metres; every figure here is already converted to true ground metres by cos(lat). The playable area is the capture, centred; the ring outside it is generated out-of-bounds terrain."
+  "note": "Import sandiego.png. Horizontal axes of the source capture are Web Mercator metres; every figure here is already converted to true ground metres by cos(lat). The playable area is the capture, centred; the ring outside it is generated out-of-bounds terrain.",
+  "water": {
+    "producedBy": "tools/maps3d-water.mjs",
+    "bodies": 27,
+    "tidalBodies": 9,
+    "surfaceKm2": 61.1,
+    "seaDepthMetres": 9,
+    "inlandDepthMetres": 2.2,
+    "note": "The capture has no bathymetry. Water bodies are dug from their own surface level; tidal ones are levelled on datum so the ocean actor at Z=0 is the waterline. Run this after maps3d-roadmesh.mjs."
+  }
 }

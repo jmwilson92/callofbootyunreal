@@ -1182,6 +1182,56 @@ def wp_api():
 
 
 LAND_MATERIAL = "/Game/Materials/M_SanDiego_Land"
+SURFACE_TEXTURE = "/Game/Textures/T_SanDiego_Surfaces"
+
+
+def _import_surface_texture():
+    """Bring sandiego-surfaces.png in as a texture asset, or None with a reason.
+
+    This is a data map, not a picture: R is a road class, G a land cover class,
+    B water. So sRGB is off — an sRGB curve would bend every code on the way in
+    and the thresholds below would land between classes — and the compression is
+    the uncompressed one. Block compression averages 4x4 blocks, and a two-pixel
+    wide alley encoded as "160" next to bare ground encoded as "0" comes back as
+    neither. 4096 x 4096 RGBA8 is 67 MB resident, which is a fair price for the
+    whole city's ground reading correctly.
+    """
+    png = os.path.join(HEIGHTMAP_DIR, "sandiego-surfaces.png")
+    if not os.path.exists(png):
+        warn("MISSING {} — pull the repo, or re-run tools/maps3d-surfaces.mjs"
+             .format(png))
+        return None
+
+    task = unreal.AssetImportTask()
+    task.set_editor_property("filename", png)
+    task.set_editor_property("destination_path", SURFACE_TEXTURE.rsplit("/", 1)[0])
+    task.set_editor_property("destination_name", SURFACE_TEXTURE.rsplit("/", 1)[1])
+    task.set_editor_property("automated", True)          # no import dialog
+    task.set_editor_property("replace_existing", True)   # re-import, don't stack
+    task.set_editor_property("save", True)
+    unreal.AssetToolsHelpers.get_asset_tools().import_asset_tasks([task])
+
+    tex = unreal.EditorAssetLibrary.load_asset(SURFACE_TEXTURE)
+    if not tex:
+        warn("the import produced no asset at {}".format(SURFACE_TEXTURE))
+        return None
+    for prop, value in (
+            ("srgb", False),
+            ("compression_settings",
+             unreal.TextureCompressionSettings.TC_VECTOR_DISPLACEMENTMAP),
+            ("lod_group", unreal.TextureGroup.TEXTUREGROUP_WORLD),
+    ):
+        try:
+            tex.set_editor_property(prop, value)
+        except Exception as exc:                                 # noqa: BLE001
+            warn("  texture.{} did not take ({})".format(prop, exc))
+    unreal.EditorAssetLibrary.save_asset(SURFACE_TEXTURE)
+    try:
+        log("imported {} ({} x {})".format(
+            SURFACE_TEXTURE, tex.blueprint_get_size_x(), tex.blueprint_get_size_y()))
+    except Exception:                                            # noqa: BLE001
+        log("imported {}".format(SURFACE_TEXTURE))
+    return tex
 
 
 def _expr(mat, class_name, x, y, **props):
@@ -1216,14 +1266,17 @@ def _wire(a, a_out, b, b_in):
     # then ComponentMask failed the same way one commit later. Trying the
     # plausible names beats discovering them one compile error at a time.
     names = (b_in,) if isinstance(b_in, str) else tuple(b_in)
-    for name in names:
-        try:
-            if unreal.MaterialEditingLibrary.connect_material_expressions(
-                    a, a_out, b, name):
-                return True
-        except Exception as exc:                                 # noqa: BLE001
-            warn("connect {} -> {} raised ({})".format(a_out or "out", name, exc))
-    _WIRE_FAILURES.append("{} -> {}".format(a_out or "out", "/".join(names)))
+    outs = (a_out,) if isinstance(a_out, str) else tuple(a_out)
+    for out in outs:
+        for name in names:
+            try:
+                if unreal.MaterialEditingLibrary.connect_material_expressions(
+                        a, out, b, name):
+                    return True
+            except Exception as exc:                             # noqa: BLE001
+                warn("connect {} -> {} raised ({})".format(out or "out", name, exc))
+    _WIRE_FAILURES.append("{} -> {}".format(
+        "/".join(o or "out" for o in outs), "/".join(names)))
     return False
 
 
@@ -1241,6 +1294,35 @@ def _saturate(mat, src, x, y):
     _wire(src, "", hi, "A")
     _wire(hi, "", lo, "A")
     return lo
+
+
+def _ramp(mat, src, src_out, lo, hi, x, y):
+    """saturate((src - lo) / (hi - lo)) — 0 at lo, 1 at hi, flat outside."""
+    sub = _expr(mat, "MaterialExpressionSubtract", x, y, const_b=float(lo))
+    div = _expr(mat, "MaterialExpressionDivide", x + 130, y,
+                const_b=float(hi) - float(lo))
+    if not (sub and div):
+        return None
+    _wire(src, src_out, sub, "A")
+    _wire(sub, "", div, "A")
+    return _saturate(mat, div, x + 260, y)
+
+
+# The land cover palette, in the order the codes run. maps3d-surfaces.mjs writes
+# one code per class into G; reading them back as a chain of blends up the same
+# order means a pixel that landed exactly on a code gets exactly that colour,
+# and a pixel the mip chain averaged between two codes gets a blend of the two
+# neighbours rather than whatever class happens to sit at the average.
+COVER_BANDS = [
+    (30,  "CoverOther",    (0.235, 0.216, 0.180)),
+    (50,  "CoverUrban",    (0.268, 0.256, 0.240)),
+    (80,  "CoverRock",     (0.196, 0.174, 0.150)),
+    (110, "CoverSand",     (0.505, 0.446, 0.322)),
+    (140, "CoverWetland",  (0.148, 0.163, 0.122)),
+    (165, "CoverFarmland", (0.243, 0.238, 0.130)),
+    (190, "CoverGrass",    (0.196, 0.216, 0.110)),
+    (220, "CoverWood",     (0.098, 0.128, 0.072)),
+]
 
 
 def _land_material():
@@ -1353,14 +1435,167 @@ def _land_material():
     if c_slope:
         _wire(c_slope, "", mix3, "Alpha")
 
+    # --- the capture's own surfaces, sampled by world position -------------
+    #
+    # Everything above is inference: height says beach, slope says cliff. This
+    # part is not inference. The capture knows where the parks, the scrub, the
+    # sand, the water and the paving actually are, and maps3d-surfaces.mjs baked
+    # that into one RGB map covering exactly the landscape's footprint. Sampling
+    # it by world position puts each class back on the ground it came off.
+    #
+    # It composites over the height/slope colour rather than replacing it, so
+    # any pixel the capture had nothing to say about still gets a sensible
+    # coast-to-mesa reading instead of a hole.
+    ground = mix3
+    surf_alpha = None
+    tex = _import_surface_texture()
+    meta = load_meta()
+    if tex and meta:
+        span_uu = transform_for(meta)["spanUU"]
+        tex_res = 4096
+        side = os.path.join(HEIGHTMAP_DIR, "sandiego-surfaces.json")
+        if os.path.exists(side):
+            with open(side, "r") as handle:
+                tex_res = int(json.load(handle)["resolution"])
+        # Pixel 0 of the map is the frame's minimum corner and pixel res-1 the
+        # maximum, so the sampled range is res-1 texels wide, offset by half a
+        # texel. Skipping that shifts the whole city two metres north-west.
+        edge = float(tex_res - 1) / float(tex_res)
+        uv_scale = edge / span_uu                    # per centimetre of world
+        uv_bias = 0.5 * edge + 0.5 / float(tex_res)
+
+        wp2 = _expr(mat, "MaterialExpressionWorldPosition", -1500, 700)
+        xy = _expr(mat, "MaterialExpressionComponentMask", -1300, 700,
+                   r=True, g=True, b=False, a=False)
+        uvm = _expr(mat, "MaterialExpressionMultiply", -1150, 700,
+                    const_b=uv_scale)
+        uva = _expr(mat, "MaterialExpressionAdd", -1000, 700, const_b=uv_bias)
+        samp = _expr(mat, "MaterialExpressionTextureSampleParameter2D",
+                     -850, 700, parameter_name="SurfaceMap", texture=tex)
+        try:
+            samp.set_editor_property(
+                "sampler_type",
+                unreal.MaterialSamplerType.SAMPLERTYPE_LINEAR_COLOR)
+        except Exception as exc:                                 # noqa: BLE001
+            warn("  sampler_type did not take ({})".format(exc))
+
+        if wp2 and xy and uvm and uva and samp:
+            _wire(wp2, "", xy, ("", "Input"))
+            _wire(xy, "", uvm, "A")
+            _wire(uvm, "", uva, "A")
+            _wire(uva, "", samp, ("UVs", "UV", ""))
+
+            # Land cover, blended up the code order.
+            cover = None
+            y = 560
+            for i, (code, label, rgb) in enumerate(COVER_BANDS):
+                col = _expr(mat, "MaterialExpressionVectorParameter", -560, y,
+                            parameter_name=label)
+                if col:
+                    col.set_editor_property(
+                        "default_value",
+                        unreal.LinearColor(rgb[0], rgb[1], rgb[2], 1.0))
+                if cover is None:
+                    cover = col                      # the floor of the chain
+                else:
+                    prev = COVER_BANDS[i - 1][0] / 255.0
+                    a = _ramp(mat, samp, "G", prev, code / 255.0, -380, y)
+                    mix = _expr(mat, "MaterialExpressionLinearInterpolate",
+                                60, y)
+                    if cover and col and a and mix:
+                        _wire(cover, "", mix, "A")
+                        _wire(col, "", mix, "B")
+                        _wire(a, "", mix, "Alpha")
+                        cover = mix
+                y += 110
+
+            # Any non-zero code counts as cover; the lowest is 30/255.
+            cov_gain = _expr(mat, "MaterialExpressionMultiply", -560, 1460,
+                             const_b=20.0)
+            cov_a = None
+            if cov_gain:
+                _wire(samp, "G", cov_gain, "A")
+                cov_a = _saturate(mat, cov_gain, -400, 1460)
+
+            # Paving. Sidewalks, paths and rail read as concrete; parking and
+            # up as asphalt. The road decks are separate geometry sitting above
+            # this, so what the ground layer is really for is everything that
+            # never got a deck.
+            pale = _expr(mat, "MaterialExpressionVectorParameter", -560, 1560,
+                         parameter_name="PavePale")
+            dark = _expr(mat, "MaterialExpressionVectorParameter", -560, 1670,
+                         parameter_name="PaveAsphalt")
+            if pale:
+                pale.set_editor_property(
+                    "default_value", unreal.LinearColor(0.400, 0.392, 0.372, 1.0))
+            if dark:
+                dark.set_editor_property(
+                    "default_value", unreal.LinearColor(0.052, 0.051, 0.055, 1.0))
+            pave_t = _ramp(mat, samp, "R", 0.28, 0.46, -380, 1620)
+            pave = _expr(mat, "MaterialExpressionLinearInterpolate", 60, 1620)
+            road_gain = _expr(mat, "MaterialExpressionMultiply", -560, 1790,
+                              const_b=14.0)
+            road_a = None
+            if road_gain:
+                _wire(samp, "R", road_gain, "A")
+                road_a = _saturate(mat, road_gain, -400, 1790)
+            if pale and dark and pave_t and pave:
+                _wire(pale, "", pave, "A")
+                _wire(dark, "", pave, "B")
+                _wire(pave_t, "", pave, "Alpha")
+
+            # Water last, because that is the order it was baked in: a bridge
+            # deck's surface polygon lies over the channel it crosses, and the
+            # channel is the thing you want to see.
+            bed = _expr(mat, "MaterialExpressionVectorParameter", -560, 1900,
+                        parameter_name="WaterBed")
+            if bed:
+                bed.set_editor_property(
+                    "default_value", unreal.LinearColor(0.036, 0.070, 0.078, 1.0))
+            wat_gain = _expr(mat, "MaterialExpressionMultiply", -560, 2010,
+                             const_b=4.0)
+            wat_a = None
+            if wat_gain:
+                _wire(samp, "B", wat_gain, "A")
+                wat_a = _saturate(mat, wat_gain, -400, 2010)
+
+            for layer, alpha, y_at in ((cover, cov_a, 300),
+                                       (pave, road_a, 420),
+                                       (bed, wat_a, 540)):
+                if not (layer and alpha):
+                    continue
+                over = _expr(mat, "MaterialExpressionLinearInterpolate", 300, y_at)
+                if not over:
+                    continue
+                _wire(ground, "", over, "A")
+                _wire(layer, "", over, "B")
+                _wire(alpha, "", over, "Alpha")
+                ground = over
+            surf_alpha = wat_a
+        else:
+            warn("surface sampling incomplete — falling back to height and slope")
+    elif not tex:
+        warn("no surface texture, so the terrain is height and slope only")
+
     unreal.MaterialEditingLibrary.connect_material_property(
-        mix3, "", unreal.MaterialProperty.MP_BASE_COLOR)
+        ground, "", unreal.MaterialProperty.MP_BASE_COLOR)
 
     rough = _expr(mat, "MaterialExpressionScalarParameter", -260, 300,
                   parameter_name="Roughness", default_value=0.88)
-    if rough:
+    rough_out = rough
+    if rough and surf_alpha:
+        # Wet ground is not 0.88 rough. Free, since the mask already exists.
+        wet = _expr(mat, "MaterialExpressionScalarParameter", -260, 380,
+                    parameter_name="RoughnessWater", default_value=0.10)
+        blend = _expr(mat, "MaterialExpressionLinearInterpolate", 300, 660)
+        if wet and blend:
+            _wire(rough, "", blend, "A")
+            _wire(wet, "", blend, "B")
+            _wire(surf_alpha, "", blend, "Alpha")
+            rough_out = blend
+    if rough_out:
         unreal.MaterialEditingLibrary.connect_material_property(
-            rough, "", unreal.MaterialProperty.MP_ROUGHNESS)
+            rough_out, "", unreal.MaterialProperty.MP_ROUGHNESS)
 
     if _WIRE_FAILURES:
         warn("{} connection(s) did not take: {}".format(
@@ -1396,6 +1631,8 @@ def material():
     log("assigned to {} of {} landscape actor(s)".format(done, len(targets)))
     log("Sand below {} m, scrub above it, mesa tops from ~{} m, rock on the "
         "steep faces.".format(11, 45))
+    log("Over that: the capture's own land cover, paving and water, read out of "
+        "{} by world position.".format(SURFACE_TEXTURE))
     log("Every colour and threshold is a named parameter — open "
         "{} to push them around.".format(LAND_MATERIAL))
     log("Save with Ctrl+S. Shaders will compile for a minute first.")
