@@ -2433,6 +2433,7 @@ def city_buildings(limit="0"):
 
     placed = 0
     culled = 0
+    cleared = 0
     for want_kind in sorted(present):
         transforms = []
         for i in range(n):
@@ -2453,6 +2454,14 @@ def city_buildings(limit="0"):
             # throw every one of them away — 3,330 parts, most of a bridge — while
             # reporting a perfectly healthy-looking count.
             structure = bool(flags & 4)
+            # Flag 8: standing on runway or taxiway pavement. maps3d-airfields.mjs
+            # flags rather than deletes these, because deleting one would shift
+            # every index after it and the structure record addresses parts by
+            # index. A building on a runway is wrong however it got there, and the
+            # pavement is the only geometry on the map placed on purpose.
+            if flags & 8:
+                cleared += 1
+                continue
 
             row_f = v_off + v * band
             col = int(round(u * (res - 1)))
@@ -2517,6 +2526,9 @@ def city_buildings(limit="0"):
 
     log("placed {} parts of {} in the plan, {} culled below the waterline"
         .format(placed, count, culled))
+    if cleared:
+        log("{} parts skipped for standing on runway or taxiway pavement"
+            .format(cleared))
     if placed == 0:
         warn("nothing was placed. If the subobject route failed above, this")
         warn("engine build cannot attach components from Python — say so rather")
