@@ -2669,6 +2669,7 @@ def city_buildings(limit="0"):
     placed = 0
     culled = 0
     cleared = 0
+    pitched = 0
     for want_kind in sorted(present):
         transforms = []
         for i in range(n):
@@ -2683,6 +2684,15 @@ def city_buildings(limit="0"):
             h = data[o + 5]
             flags = int(data[o + 7]) if stride > 7 else 0
             base = data[o + 8] if stride > 8 else 0.0
+            # Field 9, added when the format went to stride 10: how far the part
+            # leans along its own length. Without it a road deck on a slope sits
+            # flat and the next one starts higher -- a metre of step at this
+            # city's 90th-percentile grade. A part's length runs along local X
+            # and Unreal's positive pitch raises +X, so the sign carries over
+            # from atan2(rise, run) unchanged.
+            pitch = data[o + 9] if stride > 9 else 0.0
+            if pitch != pitch:                 # NaN, from a producer one short
+                pitch = 0.0
             on_water = bool(flags & 2)
             # Flag 4: built over water on purpose. Bridge piers stand on the bed of
             # a bay that is 9 m below the waterline, and the sea test below would
@@ -2731,9 +2741,11 @@ def city_buildings(limit="0"):
             y = y0 + (row_f * span_uu)
             z = (ground + base - sink + h / 2.0) * 100.0
 
+            if abs(pitch) > 0.01:
+                pitched += 1
             transforms.append(unreal.Transform(
                 unreal.Vector(x, y, z),
-                unreal.Rotator(0.0, 0.0, rot),
+                unreal.Rotator(0.0, pitch, rot),
                 unreal.Vector(w, d, h + sink)))
 
         dropped = present[want_kind] - len(transforms)
@@ -2761,6 +2773,13 @@ def city_buildings(limit="0"):
 
     log("placed {} parts of {} in the plan, {} culled below the waterline"
         .format(placed, count, culled))
+    if stride > 9:
+        log("{} parts carry a pitch (stride {}); if the roads lean the wrong "
+            "way up a hill, that is the sign convention and not the data"
+            .format(pitched, stride))
+    else:
+        warn("this buffer is stride {} and carries no pitch — road decks will "
+             "step up slopes instead of lying on them. Re-export.".format(stride))
     if cleared:
         log("{} parts skipped for standing on runway or taxiway pavement"
             .format(cleared))
