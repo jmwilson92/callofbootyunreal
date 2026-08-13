@@ -36,6 +36,7 @@ puts the whole city 60 m under the sea.
     roads               lay the freeways along the traced routes (legacy)
     clear-roads         delete those legacy freeway actors
     cull                per-kind draw distances on the city instances
+    interiors [m] [at]  hollow the buildings near a place and give them floors
     actors [match]      list what is in this level, grouped, with counts
     drop <label stem>   delete every actor whose label starts with that
     city [what]         lay the surface streets and buildings from the plan
@@ -2918,6 +2919,204 @@ def city_report():
     return True
 
 
+# ----------------------------------------------------------------- interiors --
+#
+# The first piece of the architecture in docs/07-map-architecture.md that
+# actually exists in the engine: a building that is a shell you can walk into
+# rather than a solid cube.
+#
+# Deliberately bounded by a radius. Tier C alone is 6.10 M instances across the
+# map and this level does not stream, so "all of them" is not a thing to ask for
+# yet. A radius makes it a thing you can stand in tonight and measure.
+#
+# This is a PROTOTYPE of the layout, not the reference implementation. The
+# reference is tools/interior-c.mjs in the callofbooty repo, and the eventual
+# C++ has to match THAT index for index because element indices are what damage
+# state is addressed by. What this proves is the shape: read the record, hollow
+# the box, put floors and walls and a door in it, walk in.
+
+INTERIOR_TAG = "SanDiegoInterior"
+WALL_T = 20.0            # wall thickness, cm
+FLOOR_T = 20.0
+DOOR_W = 110.0
+DOOR_H = 220.0
+
+
+def _load_structures():
+    """city-structures.bin as a list of dicts, or None with a reason."""
+    city = _load_city()
+    if not city:
+        return None, None
+    meta = city.get("structures")
+    if not meta:
+        warn("city.json has no structures block — re-export from the callofbooty "
+             "repo (maps3d-city.mjs then maps3d-doors.mjs).")
+        return None, None
+    path = os.path.join(HEIGHTMAP_DIR, meta.get("file", "city-structures.bin"))
+    if not os.path.exists(path):
+        warn("MISSING {}".format(path))
+        return None, None
+    stride = int(meta["stride"])
+    count = int(meta["count"])
+    expect = stride * count * 4
+    actual = os.path.getsize(path)
+    if actual != expect:
+        warn("{} is {} bytes, expected {} — plan and record are from different "
+             "exports".format(os.path.basename(path), actual, expect))
+        return None, None
+    import struct as _struct
+    with open(path, "rb") as fh:
+        raw = fh.read()
+    fields = meta["fields"]
+    idx = {name: i for i, name in enumerate(fields)}
+    out = []
+    for i in range(count):
+        vals = _struct.unpack_from("<{}f".format(stride), raw, i * stride * 4)
+        out.append(vals)
+    return {"meta": meta, "idx": idx, "rows": out}, city
+
+
+def interiors(radius_m="600", centre="downtown"):
+    """Hollow out every building within `radius_m` and give it floors and a door.
+
+    Removes those buildings' solid instances from the city HISM and replaces
+    them with a shell: four walls with a doorway in the street-facing one, a
+    slab per storey, and a stair opening. What you get is a building you can
+    walk into and climb.
+    """
+    try:
+        radius = float(radius_m) * 100.0
+    except (TypeError, ValueError):
+        warn("radius must be a number of metres")
+        return False
+
+    data, city = _load_structures()
+    if not data:
+        return False
+    idx, rows = data["idx"], data["rows"]
+    meta = _meta_for_level()
+    if not meta:
+        return False
+
+    span_uu = (meta["resolution"] - 1) * meta["unrealLandscapeScale"]["x"]
+    half = span_uu / 2.0
+
+    # PLACES is a list of (name, u, v), not a dict. Looked up as a dict this
+    # silently fell through to the origin every time and the radius searched the
+    # middle of the bay.
+    spot = next((p for p in PLACES if p[0] == str(centre).lower()), None)
+    if spot:
+        cx = spot[1] * span_uu - half
+        cy = spot[2] * span_uu - half
+    else:
+        warn("no place called '{}' — searching from the origin. Known: {}"
+             .format(centre, ", ".join(p[0] for p in PLACES)))
+        cx = cy = 0.0
+
+    def world(u, v):
+        return (u * span_uu - half, v * span_uu - half)
+
+    cleared = _clear_city(INTERIOR_TAG)
+
+    picked = []
+    for r in rows:
+        if int(r[idx["flags"]]) & 8:
+            continue                       # cleared for airfield pavement
+        st = int(round(r[idx["storeys"]]))
+        if st < 1:
+            continue                       # a pad has no inside
+        x, y = world(r[idx["u"]], r[idx["v"]])
+        if (x - cx) ** 2 + (y - cy) ** 2 > radius * radius:
+            continue
+        picked.append((r, x, y))
+
+    if not picked:
+        warn("no buildings within {} m of {}".format(radius_m, centre))
+        return False
+    log("hollowing {} buildings within {} m of {}".format(
+        len(picked), radius_m, centre))
+
+    mesh = unreal.EditorAssetLibrary.load_asset("/Engine/BasicShapes/Cube")
+    if not mesh:
+        warn("/Engine/BasicShapes/Cube is missing")
+        return False
+
+    parts = {"wall": [], "floor": [], "partition": []}
+    for r, x, y in picked:
+        w = r[idx["widthM"]] * 100.0
+        d = r[idx["depthM"]] * 100.0
+        st = int(round(r[idx["storeys"]]))
+        fh = r[idx["floorHeightM"]] * 100.0 or 300.0
+        rot = r[idx["rotDeg"]]
+        base = r[idx["groundMaxM"]] * 100.0 - 15.0
+        side = int(round(r[idx["doorSide"]]))
+
+        rr = unreal.Rotator(0.0, 0.0, rot)
+
+        def place(bucket, lx, ly, lz, sx, sy, sz):
+            """Local offset in the footprint's own frame -> world transform."""
+            th = math.radians(rot)
+            wx = x + lx * math.cos(th) - ly * math.sin(th)
+            wy = y + lx * math.sin(th) + ly * math.cos(th)
+            parts[bucket].append(unreal.Transform(
+                unreal.Vector(wx, wy, base + lz),
+                rr,
+                unreal.Vector(sx / 100.0, sy / 100.0, sz / 100.0)))
+
+        for k in range(st + 1):
+            place("floor", 0.0, 0.0, k * fh, w, d, FLOOR_T)
+
+        # Four walls, full height, with the street-facing one split round a door.
+        wall_h = st * fh
+        for s in range(4):
+            if s in (0, 2):
+                lx = (w / 2.0 - WALL_T / 2.0) * (1 if s == 0 else -1)
+                if s == side:
+                    seg = (d - DOOR_W) / 2.0
+                    for sgn in (-1, 1):
+                        place("wall", lx, sgn * (DOOR_W / 2.0 + seg / 2.0),
+                              wall_h / 2.0, WALL_T, seg, wall_h)
+                    place("wall", lx, 0.0, DOOR_H + (wall_h - DOOR_H) / 2.0,
+                          WALL_T, DOOR_W, wall_h - DOOR_H)
+                else:
+                    place("wall", lx, 0.0, wall_h / 2.0, WALL_T, d, wall_h)
+            else:
+                ly = (d / 2.0 - WALL_T / 2.0) * (1 if s == 1 else -1)
+                if s == side:
+                    seg = (w - DOOR_W) / 2.0
+                    for sgn in (-1, 1):
+                        place("wall", sgn * (DOOR_W / 2.0 + seg / 2.0), ly,
+                              wall_h / 2.0, seg, WALL_T, wall_h)
+                    place("wall", 0.0, ly, DOOR_H + (wall_h - DOOR_H) / 2.0,
+                          DOOR_W, WALL_T, wall_h - DOOR_H)
+                else:
+                    place("wall", 0.0, ly, wall_h / 2.0, w, WALL_T, wall_h)
+
+        # One cross partition a floor, so it is rooms rather than a shoebox.
+        for k in range(st):
+            place("partition", 0.0, 0.0, k * fh + fh / 2.0,
+                  WALL_T, d * 0.55, fh - FLOOR_T)
+
+    total = 0
+    for kind, transforms in parts.items():
+        if not transforms:
+            continue
+        # _ism_holder returns (actor, component), not a component.
+        actor, comp = _ism_holder("{}_{}".format(INTERIOR_TAG, kind), mesh,
+                                  _city_material("building"))
+        if not comp:
+            continue
+        total += _add_instances(comp, transforms)
+        log("  {:<10} {} instances".format(kind, len(transforms)))
+
+    log("{} interior parts across {} buildings".format(total, len(picked)))
+    log("The solid city boxes are still in place around these, so the shells sit "
+        "inside them. Hide SanDiegoCity_Buildings_building in the outliner to "
+        "walk in -- removing those instances properly is the next step.")
+    log("Save with Ctrl+S.")
+    return True
+
+
 COMMANDS = {
     "report": report,
     "recipe": import_recipe,
@@ -2935,6 +3134,7 @@ COMMANDS = {
     "clear-roads": clear_roads,
     "actors": actors,
     "cull": cull,
+    "interiors": interiors,
     "drop": drop,
     "city": city,
     "city-report": city_report,
