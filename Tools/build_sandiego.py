@@ -3136,6 +3136,134 @@ def interiors(radius_m="600", centre="downtown"):
     return True
 
 
+def patrol(shots_file=None, out_dir=None):
+    """Fly the viewport through a list of waypoints and screenshot each one.
+
+    The reason this exists: tools/flyover.mjs can render the shipped bytes from
+    any camera, but it renders the DATA. Materials, lighting, LOD popping, HISM
+    cull distances and collision belong to the engine, and nothing outside the
+    engine can photograph them. So this is the other half — the editor's own
+    view, from the same waypoints, saved as files that can be looked at
+    together.
+
+        py "Tools/build_sandiego.py" patrol
+        py "Tools/build_sandiego.py" patrol Tools/patrol.json Saved/Patrol
+
+    The waypoint file is the same shape flyover.mjs takes, so one list drives
+    both: [{"name","u","v","eye","look","tilt"}, ...]. Without one, it walks a
+    default circuit of the places defects have actually turned up in.
+
+    A screenshot is asynchronous — the request is queued and served on a later
+    frame — so a plain for-loop produces one image, or none, and reports
+    success. This drives a state machine off the editor's own tick instead, one
+    waypoint at a time, and only advances once the file has appeared on disk.
+    """
+    meta = load_meta()
+    if not meta:
+        return False
+
+    root = unreal.Paths.project_dir()
+    out = out_dir or os.path.join(root, "Saved", "Patrol")
+    out = os.path.abspath(out)
+    if not os.path.isdir(out):
+        os.makedirs(out)
+
+    shots = None
+    if shots_file:
+        path = shots_file if os.path.isabs(shots_file) else os.path.join(root, shots_file)
+        try:
+            with open(path, "r") as fh:
+                shots = json.load(fh)
+        except Exception as exc:
+            warn("could not read {} ({}) — using the default circuit".format(path, exc))
+    if not shots:
+        # Every one of these is a place a defect has actually turned up in, and
+        # the two airfields are first because their geometry was missing from a
+        # shipped buffer for a week.
+        shots = [
+            {"name": "ksan",        "u": 0.5196, "v": 0.3626, "eye": 260, "look": 100, "tilt": -22},
+            {"name": "ksan-low",    "u": 0.5196, "v": 0.3626, "eye": 12,  "look": 100, "tilt": -2},
+            {"name": "northisland", "u": 0.3932, "v": 0.5737, "eye": 300, "look": 121, "tilt": -24},
+            {"name": "downtown",    "u": 0.6755, "v": 0.4716, "eye": 140, "look": 210, "tilt": -14},
+            {"name": "pointloma",   "u": 0.2373, "v": 0.7514, "eye": 40,  "look": 20,  "tilt": -8},
+            {"name": "mcrd",        "u": 0.4744, "v": 0.3152, "eye": 120, "look": 90,  "tilt": -18},
+            {"name": "coronado",    "u": 0.7523, "v": 0.6273, "eye": 90,  "look": 300, "tilt": -10},
+            {"name": "zoo",         "u": 0.7414, "v": 0.3455, "eye": 80,  "look": 180, "tilt": -12},
+        ]
+
+    res_x = int(os.environ.get("PATROL_W", "1920"))
+    res_y = int(os.environ.get("PATROL_H", "1080"))
+
+    try:
+        ues = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem)
+    except Exception as exc:
+        warn("no UnrealEditorSubsystem ({}) — cannot drive the viewport".format(exc))
+        return False
+
+    state = {"i": 0, "waited": 0, "shot": False, "done": [], "handle": None}
+
+    def finish():
+        if state["handle"] is not None:
+            unreal.unregister_slate_post_tick_callback(state["handle"])
+            state["handle"] = None
+        log("{} of {} frames written to {}".format(
+            len(state["done"]), len(shots), out))
+        for name in state["done"]:
+            log("  {}".format(name))
+        if len(state["done"]) < len(shots):
+            warn("some frames never appeared. The viewport must be visible and "
+                 "not minimised for a screenshot to be served.")
+        log("Nothing here changed the level, so there is nothing to save.")
+
+    def tick(_delta):
+        i = state["i"]
+        if i >= len(shots):
+            finish()
+            return
+        s = shots[i]
+        name = s.get("name", "shot{}".format(i))
+        path = os.path.join(out, "{:02d}-{}.png".format(i, name))
+
+        if not state["shot"]:
+            # Place the camera. `eye` is metres above the ground under the
+            # waypoint, not an absolute height, so a shot list reads the same
+            # way whether it is over the bay or over Point Loma.
+            p = uv_to_world(meta, float(s["u"]), float(s["v"]))
+            ground = _sample_metres(meta, p["col"], p["row"]) or 0.0
+            z = (ground + float(s.get("eye", 60))) * 100.0
+            # Unreal yaw is measured the same way maps3d writes a heading:
+            # atan2(dy, dx) with +y running down the image, so a bearing here
+            # matches a bearing in flyover.mjs and the two views line up.
+            rot = unreal.Rotator(0.0, float(s.get("tilt", -12)), float(s.get("look", 0)))
+            ues.set_level_viewport_camera_info(unreal.Vector(p["x"], p["y"], z), rot)
+            if os.path.exists(path):
+                os.remove(path)
+            unreal.AutomationLibrary.take_high_res_screenshot(res_x, res_y, path)
+            state["shot"] = True
+            state["waited"] = 0
+            return
+
+        # Wait for the file. The request is served on a later frame, and how
+        # many depends on what the renderer is doing, so this watches for the
+        # artefact rather than counting frames and hoping.
+        state["waited"] += 1
+        if os.path.exists(path) and os.path.getsize(path) > 0:
+            state["done"].append(os.path.basename(path))
+            state["i"] += 1
+            state["shot"] = False
+        elif state["waited"] > 600:              # ~10 s at 60 fps
+            warn("{} never appeared — skipping".format(os.path.basename(path)))
+            state["i"] += 1
+            state["shot"] = False
+
+    log("patrolling {} waypoints at {}x{} into {}".format(
+        len(shots), res_x, res_y, out))
+    log("Leave the editor alone and visible until it reports done — a "
+        "screenshot cannot be served to a minimised viewport.")
+    state["handle"] = unreal.register_slate_post_tick_callback(tick)
+    return True
+
+
 COMMANDS = {
     "report": report,
     "recipe": import_recipe,
@@ -3159,6 +3287,7 @@ COMMANDS = {
     "city-report": city_report,
     "sample": sample,
     "load": load_all,
+    "patrol": patrol,
     "wp-api": wp_api,
     "templates": list_templates,
 }
