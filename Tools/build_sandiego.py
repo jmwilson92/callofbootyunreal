@@ -33,7 +33,8 @@ puts the whole city 60 m under the sea.
     overview            camera 12 km up, looking straight down
     water               lay a sea surface at Z=0 across the map
     material            colour the terrain by height and slope
-    roads               lay the freeways along the traced routes
+    roads               lay the freeways along the traced routes (legacy)
+    clear-roads         delete those legacy freeway actors
     city [what]         lay the surface streets and buildings from the plan
     city-report         what the city plan contains, without touching the level
     sample              compare the level against the file, per tile
@@ -903,6 +904,68 @@ def water():
 
 
 BOUNDS_TAG = "SanDiegoOutOfBounds"
+
+
+def _cube_builder():
+    """A CubeBuilder, however this engine version is willing to give one.
+
+    5.8 does not expose unreal.CubeBuilder as a generated Python type, so the
+    direct constructor raises AttributeError and every out-of-bounds volume
+    comes out with no brush and no collision. The class is still in the Engine
+    module; it just has to be loaded by path.
+    """
+    try:
+        return unreal.CubeBuilder()
+    except AttributeError:
+        pass
+    for path in ("/Script/Engine.CubeBuilder", "/Script/Engine.Default__CubeBuilder"):
+        try:
+            cls = unreal.load_class(None, path)
+            if cls:
+                return unreal.new_object(cls)
+        except Exception:                                        # noqa: BLE001
+            continue
+    return None
+
+
+def _size_volume(vol, world, label, sx, sy, sz):
+    """Make a volume the size asked for, by brush if possible and by scale if not.
+
+    The fallback does not need to know how big the default brush is: it measures
+    what it got and scales by the ratio. That is the only version of this that
+    survives an engine upgrade, because the thing it depends on -- that a spawned
+    volume has SOME brush -- is the part that does not change.
+    """
+    cube = _cube_builder()
+    if cube is not None:
+        for prop, value in (("x", sx), ("y", sy), ("z", sz)):
+            try:
+                cube.set_editor_property(prop, float(value))
+            except Exception as exc:                             # noqa: BLE001
+                warn("  CubeBuilder.{} did not take ({})".format(prop, exc))
+        try:
+            vol.set_editor_property("brush_builder", cube)
+            cube.build(world, vol)
+        except Exception as exc:                                 # noqa: BLE001
+            warn("  brush build failed for {} ({})".format(label, exc))
+
+    try:
+        _, extent = vol.get_actor_bounds(False)
+        got = (extent.x * 2.0, extent.y * 2.0, extent.z * 2.0)
+        want = (sx, sy, sz)
+        if all(abs(g - w) < max(200.0, w * 0.05) for g, w in zip(got, want)):
+            return True
+        if min(got) <= 1.0:
+            warn("  {} has no brush at all to scale".format(label))
+            return False
+        vol.set_actor_scale3d(unreal.Vector(
+            *[w / g for w, g in zip(want, got)]))
+        log("  {} sized by scaling its default brush "
+            "(CubeBuilder unavailable on this engine)".format(label))
+        return True
+    except Exception as exc:                                     # noqa: BLE001
+        warn("  could not size {} ({})".format(label, exc))
+        return False
 BOUNDS_DAMAGE_PER_SEC = 12.0
 BOUNDS_CEILING_M = 400.0
 BOUNDS_FLOOR_M = -60.0
@@ -989,17 +1052,7 @@ def bounds():
         except Exception as exc:                                 # noqa: BLE001
             warn("  tag did not take ({})".format(exc))
 
-        cube = unreal.CubeBuilder()
-        for prop, value in (("x", sx), ("y", sy), ("z", tall)):
-            try:
-                cube.set_editor_property(prop, float(value))
-            except Exception as exc:                             # noqa: BLE001
-                warn("  CubeBuilder.{} did not take ({})".format(prop, exc))
-        try:
-            vol.set_editor_property("brush_builder", cube)
-            cube.build(world, vol)
-        except Exception as exc:                                 # noqa: BLE001
-            warn("  brush build failed for {} ({})".format(label, exc))
+        _size_volume(vol, world, label, sx, sy, tall)
 
         for prop, value in (("pain_causing", True),
                             ("damage_per_sec", BOUNDS_DAMAGE_PER_SEC),
@@ -1791,6 +1844,31 @@ def material():
 
 ROAD_MATERIAL = "/Game/Materials/M_Road"
 ROAD_TAG = "SanDiegoFreeway"
+
+
+def clear_roads():
+    """Remove the freeways laid by the legacy `roads` command.
+
+    Road geometry comes through the packed buffer now -- road_deck, line_white,
+    line_yellow and kerb, built by tools/maps3d-roadmesh.mjs from traced
+    centrelines. The old freeway actors are from the invented plan that
+    preceded it, and nothing removed them: `clear-landscape` only deletes
+    landscapes and `city` only clears what `city` placed, so they survived
+    every re-import and sat on top of the new streets.
+    """
+    sub = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+    removed = 0
+    for a in sub.get_all_level_actors():
+        try:
+            if a.actor_has_tag(ROAD_TAG) or a.get_actor_label().startswith(ROAD_TAG):
+                sub.destroy_actor(a)
+                removed += 1
+        except Exception:                                        # noqa: BLE001
+            continue
+    log("removed {} legacy freeway actor(s)".format(removed))
+    if removed:
+        log("Save with Ctrl+S.")
+    return removed
 
 # The real corridors, traced from the reference map, in the same normalised
 # (u, v) as everything else. Widths are metres.
@@ -2712,6 +2790,7 @@ COMMANDS = {
     "bounds": bounds,
     "material": material,
     "roads": roads,
+    "clear-roads": clear_roads,
     "city": city,
     "city-report": city_report,
     "sample": sample,
