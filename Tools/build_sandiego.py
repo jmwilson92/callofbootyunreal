@@ -2080,6 +2080,15 @@ CITY_PALETTE = {
     "sign_post":  ((0.550, 0.560, 0.570), 0.70),
     "lamp_post":  ((0.470, 0.478, 0.486), 0.62),
     "lamp":       ((0.780, 0.760, 0.700), 0.40),
+    # The airfield kit. `runway` had an entry from the old plan and the four
+    # pieces laid on top of it did not, so 741 parts imported as default grey —
+    # markings and edge lights the same colour as the asphalt they sit on.
+    # Runway paint is whiter and flatter than road paint; edge lights are amber
+    # glass; taxiway asphalt is a shade lighter than the strip it serves.
+    "runway_centreline": ((0.900, 0.900, 0.880), 0.50),
+    "runway_threshold":  ((0.920, 0.920, 0.900), 0.50),
+    "runway_light":      ((0.760, 0.700, 0.320), 0.30),
+    "taxiway":           ((0.105, 0.102, 0.098), 0.76),
     "tree":       ((0.118, 0.170, 0.086), 0.92),
     "tree_trunk": ((0.128, 0.104, 0.078), 0.94),
     "palm":       ((0.150, 0.196, 0.104), 0.90),
