@@ -35,6 +35,7 @@ puts the whole city 60 m under the sea.
     material            colour the terrain by height and slope
     roads               lay the freeways along the traced routes (legacy)
     clear-roads         delete those legacy freeway actors
+    cull                per-kind draw distances on the city instances
     actors [match]      list what is in this level, grouped, with counts
     drop <label stem>   delete every actor whose label starts with that
     city [what]         lay the surface streets and buildings from the plan
@@ -2174,6 +2175,71 @@ def roads():
 # components it is a few dozen actors and the renderer batches the rest.
 
 CITY_TAG = "SanDiegoCity"
+
+# How far each kind is worth drawing, in metres. Nothing streams in a
+# non-partitioned level, so every one of 745,926 instances is resident and
+# considered every frame unless it is told not to be. HISM culls per instance,
+# which makes this the cheapest large win available here: a kerb two kilometres
+# away costs nothing if it is never submitted.
+#
+# The numbers are what the thing is actually legible at. Lane paint stops
+# reading at a few hundred metres; a tower is the skyline and has to draw from
+# anywhere on the map. Anything absent from this list draws everywhere and is
+# named in the log rather than silently given a default -- the same rule the
+# rest of this pipeline follows.
+CULL_M = {
+    "building": 0, "pad": 6000, "water": 0, "pier": 4000,
+    "road_deck": 4000, "kerb": 900, "line_white": 700, "line_yellow": 700,
+    "path": 700, "sign": 450, "sign_post": 450,
+    "lamp": 1200, "lamp_post": 1200,
+    "tree": 3000, "tree_trunk": 3000, "shrub": 700, "rock": 700,
+    "runway": 8000, "taxiway": 8000,
+    "runway_centreline": 1800, "runway_threshold": 1800, "runway_light": 1200,
+}
+
+
+def cull():
+    """Apply per-kind draw distances to the city HISMs, without rebuilding.
+
+    Separate from `city` on purpose: `city` takes long enough that nobody
+    should have to re-run it to change a draw distance.
+    """
+    sub = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+    prefix = CITY_TAG + "_Buildings_"
+    done = 0
+    missing = []
+    for a in sub.get_all_level_actors():
+        try:
+            label = a.get_actor_label()
+            if not label.startswith(prefix):
+                continue
+            kind = label[len(prefix):]
+            end_m = CULL_M.get(kind)
+            if end_m is None:
+                missing.append(kind)
+                continue
+            for comp in a.get_components_by_class(
+                    unreal.HierarchicalInstancedStaticMeshComponent):
+                if end_m <= 0:
+                    comp.set_editor_property("instance_start_cull_distance", 0)
+                    comp.set_editor_property("instance_end_cull_distance", 0)
+                else:
+                    comp.set_editor_property(
+                        "instance_start_cull_distance", int(end_m * 100 * 0.75))
+                    comp.set_editor_property(
+                        "instance_end_cull_distance", int(end_m * 100))
+                done += 1
+            log("  {:<18} {}".format(
+                kind, "always drawn" if end_m <= 0 else "{} m".format(end_m)))
+        except Exception:                                        # noqa: BLE001
+            continue
+    if missing:
+        warn("no cull distance for {} — those draw everywhere. Add them to "
+             "CULL_M.".format(", ".join(sorted(set(missing)))))
+    log("set draw distances on {} component(s)".format(done))
+    if done:
+        log("Save with Ctrl+S.")
+    return done
 CITY_JSON = "city.json"
 CITY_BIN = "city-buildings.bin"
 
@@ -2868,6 +2934,7 @@ COMMANDS = {
     "roads": roads,
     "clear-roads": clear_roads,
     "actors": actors,
+    "cull": cull,
     "drop": drop,
     "city": city,
     "city-report": city_report,
