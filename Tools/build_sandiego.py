@@ -2558,6 +2558,12 @@ def city_buildings(limit="0"):
     scale_x = meta["unrealLandscapeScale"]["x"]
 
     _clear_city(CITY_TAG + "_Buildings")
+    # Placed by versions of this script that no longer exist, and removed by
+    # nothing: the landmark boxes and the legacy street grid. They were built
+    # against a landscape with a different scale and Z lift, so they do not even
+    # land in the right place any more.
+    for stale in (CITY_TAG + "_Streets", "SanDiegoLandmark"):
+        _clear_city(stale)
 
     # Group by kind first, then fill one component per kind. Grouping keeps the
     # instance buffers homogeneous, which is the whole point: one draw call per
@@ -2717,6 +2723,13 @@ def city_streets():
     city = _load_city()
     if not meta or not city:
         return False
+
+    # Clear BEFORE deciding there is nothing to do. This returned early on the
+    # maps3d plan and so never reached its own _clear_city below, which meant
+    # the street grid from the invented plan survived every single re-import --
+    # thousands of instances of it, sitting on top of the real roads, and
+    # nothing in any log mentioning them.
+    _clear_city(CITY_TAG + "_Streets")
 
     legacy = len(city.get("arterials", [])) + len(city.get("streets", []))
     if not legacy:
