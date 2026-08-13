@@ -368,8 +368,12 @@ def report():
     # These two disagreeing is not cosmetic: it means imports and exports are
     # looking at different files, which is invisible unless something says so.
     try:
-        proj_hm = os.path.normpath(os.path.join(proj, "Tools", "Heightmaps"))
-        if os.path.normpath(HEIGHTMAP_DIR) != proj_hm:
+        # project_dir() comes back relative to the engine binary — a string of
+        # "../../.." that never string-compares equal to an absolute path even
+        # when it names the same folder. Resolve both before comparing, or this
+        # warns on a perfectly correct setup and teaches everyone to ignore it.
+        proj_hm = os.path.realpath(os.path.join(proj, "Tools", "Heightmaps"))
+        if os.path.realpath(HEIGHTMAP_DIR) != proj_hm:
             warn("the open project is NOT where these heightmaps live.")
             warn("  reading  : {}".format(HEIGHTMAP_DIR))
             warn("  project  : {}".format(proj_hm))
@@ -412,7 +416,15 @@ def report():
     log("  heights      : {}..{} m observed, {}..{} m encoded".format(
         meta["observedMetres"]["min"], meta["observedMetres"]["max"],
         meta["heightRangeMetres"]["min"], meta["heightRangeMetres"]["max"]))
-    log("  land cover   : {:.1f}%".format(meta["landCoverage"] * 100))
+    # landCoverage was dropped from the sidecar; report what is there rather
+    # than crashing on what is not. Anything optional gets the same treatment.
+    if "landCoverage" in meta:
+        log("  land cover   : {:.1f}%".format(meta["landCoverage"] * 100))
+    if "playableMetres" in meta:
+        log("  playable     : {:.2f} x {:.2f} km inside a {:.0f} m ring".format(
+            meta["playableMetres"]["width"] / 1000.0,
+            meta["playableMetres"]["height"] / 1000.0,
+            meta.get("outOfBoundsRingMetres", 0)))
     log("  in engine    : {:.2f} km square, {:.2f} m per quad".format(
         tr["spanKM"], tr["scale"][0] / 100.0))
     if lay:
