@@ -35,6 +35,8 @@ puts the whole city 60 m under the sea.
     material            colour the terrain by height and slope
     roads               lay the freeways along the traced routes (legacy)
     clear-roads         delete those legacy freeway actors
+    actors [match]      list what is in this level, grouped, with counts
+    drop <label stem>   delete every actor whose label starts with that
     city [what]         lay the surface streets and buildings from the plan
     city-report         what the city plan contains, without touching the level
     sample              compare the level against the file, per tile
@@ -1846,6 +1848,67 @@ ROAD_MATERIAL = "/Game/Materials/M_Road"
 ROAD_TAG = "SanDiegoFreeway"
 
 
+def actors(pattern=""):
+    """List what is actually in this level, grouped, with counts and extents.
+
+    Guessing at an actor's tag from a screenshot is how the legacy freeways
+    survived three re-imports. This prints what is really there: the label stem,
+    how many, what class, and where the group sits -- enough to say "those grey
+    slabs over the bay are these" and then remove exactly those.
+    """
+    sub = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+    groups = {}
+    for a in sub.get_all_level_actors():
+        try:
+            label = a.get_actor_label()
+            if pattern and pattern.lower() not in label.lower():
+                continue
+            stem = label.rstrip("0123456789_") or label
+            cls = a.get_class().get_name()
+            key = (stem, cls)
+            g = groups.setdefault(key, {"n": 0, "tags": set(), "z": []})
+            g["n"] += 1
+            try:
+                for t in a.get_editor_property("tags") or []:
+                    g["tags"].add(str(t))
+            except Exception:                                    # noqa: BLE001
+                pass
+            g["z"].append(a.get_actor_location().z)
+        except Exception:                                        # noqa: BLE001
+            continue
+    if not groups:
+        log("no actors matched '{}'".format(pattern))
+        return 0
+    log("=" * 72)
+    log("{:<34} {:>6}  {:<22} {}".format("label stem", "count", "class", "tags"))
+    for (stem, cls), g in sorted(groups.items(), key=lambda kv: -kv[1]["n"]):
+        log("{:<34} {:>6}  {:<22} {}".format(
+            stem[:34], g["n"], cls[:22], ",".join(sorted(g["tags"])) or "-"))
+    log("=" * 72)
+    log("Remove a group with: ... build_sandiego.py drop <label stem>")
+    return len(groups)
+
+
+def drop(stem=""):
+    """Delete every actor whose label starts with `stem`. Say what went."""
+    if not stem:
+        warn("drop needs a label stem -- run `actors` first to see them")
+        return 0
+    sub = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+    removed = 0
+    for a in sub.get_all_level_actors():
+        try:
+            if a.get_actor_label().startswith(stem):
+                sub.destroy_actor(a)
+                removed += 1
+        except Exception:                                        # noqa: BLE001
+            continue
+    log("dropped {} actor(s) whose label starts with '{}'".format(removed, stem))
+    if removed:
+        log("Save with Ctrl+S.")
+    return removed
+
+
 def clear_roads():
     """Remove the freeways laid by the legacy `roads` command.
 
@@ -2791,6 +2854,8 @@ COMMANDS = {
     "material": material,
     "roads": roads,
     "clear-roads": clear_roads,
+    "actors": actors,
+    "drop": drop,
     "city": city,
     "city-report": city_report,
     "sample": sample,
